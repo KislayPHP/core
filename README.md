@@ -1,6 +1,23 @@
 # KislayPHP Core
 
-This is a PHP extension written in C++ that provides a simple HTTP/HTTPS server with routing capabilities.
+KislayPHP Core is a C++ PHP extension that provides a compact HTTP/HTTPS server with routing and middleware for building lightweight services.
+
+## Key Features
+
+- HTTP/HTTPS server built on civetweb.
+- Routing with parameters and middleware support.
+- Request and response helpers for JSON, headers, and status codes.
+- Configurable via INI and environment values.
+
+## Use Cases
+
+- Local development servers for service prototypes.
+- Small API services that need low overhead.
+- Embedded admin endpoints for existing PHP apps.
+
+## SEO Keywords
+
+PHP HTTP server, C++ PHP extension, routing middleware, lightweight API, HTTPS, microservices
 
 ## Repository
 
