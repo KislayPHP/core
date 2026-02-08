@@ -1,6 +1,19 @@
-# kislayphp_extension
+# KislayPHP Core
 
 This is a PHP extension written in C++ that provides a simple HTTP/HTTPS server with routing capabilities.
+
+## Repository
+
+- https://github.com/KislayPHP/core
+
+## Related Modules
+
+- https://github.com/KislayPHP/eventbus
+- https://github.com/KislayPHP/discovery
+- https://github.com/KislayPHP/gateway
+- https://github.com/KislayPHP/config
+- https://github.com/KislayPHP/metrics
+- https://github.com/KislayPHP/queue
 
 ## Installation
 
@@ -17,8 +30,8 @@ brew install openssl
 
 1. Clone the repository:
    ```sh
-   git clone https://github.com/USERNAME/kislayphp_extension.git
-   cd kislayphp_extension
+   git clone https://github.com/KislayPHP/core.git
+   cd core
    ```
 
 2. Prepare the project for building:
@@ -31,7 +44,7 @@ brew install openssl
 
 3. Run the example from this repo (no system install needed):
    ```sh
-   cd /path/to/phpExtension/https
+   cd /path/to/core
    php -d extension=modules/kislay_extension.so example.php
    ```
 
