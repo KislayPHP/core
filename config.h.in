@@ -1,8 +1,8 @@
 /* config.h.in.  Generated from configure.ac by autoheader.  */
 
-/* Define to 1 if the PHP extension 'kislay_extension' is built as a dynamic
-   module. */
-#undef COMPILE_DL_KISLAY_EXTENSION
+/* Define to 1 if the PHP extension 'kislayphp_extension' is built as a
+   dynamic module. */
+#undef COMPILE_DL_KISLAYPHP_EXTENSION
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #undef HAVE_DLFCN_H
