@@ -8,6 +8,10 @@ extern "C" {
 #include "Zend/zend_smart_str.h"
 }
 
+#include <curl/curl.h>
+#include <thread>
+#include <future>
+
 #include "php_kislay_extension.h"
 
 #include <civetweb.h>
@@ -58,6 +62,7 @@ static zend_class_entry *kislay_app_ce;
 static zend_class_entry *kislay_request_ce;
 static zend_class_entry *kislay_response_ce;
 static zend_class_entry *kislay_next_ce;
+static zend_class_entry *kislay_async_http_ce;
 
 ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     zend_long http_threads;
@@ -65,6 +70,7 @@ ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     zend_long max_body;
     zend_bool cors_enabled;
     zend_bool log_enabled;
+    zend_bool async_enabled;
     char *tls_cert;
     char *tls_key;
 ZEND_END_MODULE_GLOBALS(kislayphp_extension)
@@ -83,6 +89,7 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("kislayphp.http.max_body", "0", PHP_INI_ALL, OnUpdateLong, max_body, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.cors", "0", PHP_INI_ALL, OnUpdateBool, cors_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.log", "0", PHP_INI_ALL, OnUpdateBool, log_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.async", "0", PHP_INI_ALL, OnUpdateBool, async_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_cert", "", PHP_INI_ALL, OnUpdateString, tls_cert, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_key", "", PHP_INI_ALL, OnUpdateString, tls_key, zend_kislayphp_extension_globals, kislayphp_extension_globals)
 PHP_INI_END()
@@ -106,7 +113,6 @@ struct GroupContext {
 }
 
 typedef struct _php_kislay_request_t {
-    zend_object std;
     std::string method;
     std::string uri;
     std::string path;
@@ -117,26 +123,30 @@ typedef struct _php_kislay_request_t {
     std::unordered_map<std::string, std::string> body_params;
     std::unordered_map<std::string, std::string> headers;
     std::unordered_map<std::string, zval> attributes;
+    zval json_cache;
+    bool json_cached;
+    bool json_valid;
+    zend_object std;
 } php_kislay_request_t;
 
 typedef struct _php_kislay_response_t {
-    zend_object std;
     std::string body;
     std::string content_type;
     std::unordered_map<std::string, std::string> headers;
     zend_long status_code;
+    zend_object std;
 } php_kislay_response_t;
 
 typedef struct _php_kislay_next_t {
-    zend_object std;
     bool *continue_flag;
+    zend_object std;
 } php_kislay_next_t;
 
 typedef struct _php_kislay_app_t {
-    zend_object std;
     std::vector<kislay::Route> routes;
     std::vector<zval> middleware;
     std::vector<kislay::GroupContext> group_stack;
+    std::unordered_map<std::string, size_t> exact_routes;
     std::mutex lock;
     struct mg_context *ctx;
     bool running;
@@ -147,14 +157,25 @@ typedef struct _php_kislay_app_t {
     size_t max_body_bytes;
     bool cors_enabled;
     bool log_enabled;
+    bool async_enabled;
     std::string default_tls_cert;
     std::string default_tls_key;
+    zend_object std;
 } php_kislay_app_t;
+
+typedef struct _php_kislay_async_http_t {
+    CURL *curl;
+    struct curl_slist *headers;
+    std::string response_body;
+    long response_code;
+    zend_object std;
+} php_kislay_async_http_t;
 
 static zend_object_handlers kislay_request_handlers;
 static zend_object_handlers kislay_response_handlers;
 static zend_object_handlers kislay_next_handlers;
 static zend_object_handlers kislay_app_handlers;
+static zend_object_handlers kislay_async_http_handlers;
 
 static inline php_kislay_request_t *php_kislay_request_from_obj(zend_object *obj) {
     return reinterpret_cast<php_kislay_request_t *>(
@@ -176,6 +197,11 @@ static inline php_kislay_app_t *php_kislay_app_from_obj(zend_object *obj) {
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_app_t, std));
 }
 
+static inline php_kislay_async_http_t *php_kislay_async_http_from_obj(zend_object *obj) {
+    return reinterpret_cast<php_kislay_async_http_t *>(
+        reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_async_http_t, std));
+}
+
 static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     php_kislay_request_t *req = static_cast<php_kislay_request_t *>(
         ecalloc(1, sizeof(php_kislay_request_t) + zend_object_properties_size(ce)));
@@ -191,6 +217,9 @@ static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     new (&req->body_params) std::unordered_map<std::string, std::string>();
     new (&req->headers) std::unordered_map<std::string, std::string>();
     new (&req->attributes) std::unordered_map<std::string, zval>();
+    ZVAL_UNDEF(&req->json_cache);
+    req->json_cached = false;
+    req->json_valid = false;
     req->std.handlers = &kislay_request_handlers;
     return &req->std;
 }
@@ -199,6 +228,9 @@ static void kislay_request_free_obj(zend_object *object) {
     php_kislay_request_t *req = php_kislay_request_from_obj(object);
     for (auto &item : req->attributes) {
         zval_ptr_dtor(&item.second);
+    }
+    if (req->json_cached && !Z_ISUNDEF(req->json_cache)) {
+        zval_ptr_dtor(&req->json_cache);
     }
     req->attributes.~unordered_map();
     req->headers.~unordered_map();
@@ -257,6 +289,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     new (&app->routes) std::vector<kislay::Route>();
     new (&app->middleware) std::vector<zval>();
     new (&app->group_stack) std::vector<kislay::GroupContext>();
+    new (&app->exact_routes) std::unordered_map<std::string, size_t>();
     new (&app->lock) std::mutex();
     app->ctx = nullptr;
     app->running = false;
@@ -264,9 +297,14 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->gc_after_request = true;
     app->thread_count = static_cast<int>(kislay_env_long("KISLAYPHP_HTTP_THREADS", KISLAYPHP_EXTENSION_G(http_threads)));
     app->read_timeout_ms = kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms));
-    app->max_body_bytes = static_cast<size_t>(kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body)));
+    zend_long max_body = kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body));
+    if (max_body < 0) {
+        max_body = 0;
+    }
+    app->max_body_bytes = static_cast<size_t>(max_body);
     app->cors_enabled = kislay_env_bool("KISLAYPHP_HTTP_CORS", KISLAYPHP_EXTENSION_G(cors_enabled) != 0);
     app->log_enabled = kislay_env_bool("KISLAYPHP_HTTP_LOG", KISLAYPHP_EXTENSION_G(log_enabled) != 0);
+    app->async_enabled = kislay_env_bool("KISLAYPHP_HTTP_ASYNC", KISLAYPHP_EXTENSION_G(async_enabled) != 0);
     new (&app->default_tls_cert) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_CERT", KISLAYPHP_EXTENSION_G(tls_cert) ? KISLAYPHP_EXTENSION_G(tls_cert) : ""));
     new (&app->default_tls_key) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_KEY", KISLAYPHP_EXTENSION_G(tls_key) ? KISLAYPHP_EXTENSION_G(tls_key) : ""));
     app->std.handlers = &kislay_app_handlers;
@@ -296,10 +334,34 @@ static void kislay_app_free_obj(zend_object *object) {
     app->group_stack.~vector();
     app->middleware.~vector();
     app->routes.~vector();
+    app->exact_routes.~unordered_map();
     app->default_tls_cert.~basic_string();
     app->default_tls_key.~basic_string();
     app->lock.~mutex();
     zend_object_std_dtor(&app->std);
+}
+
+static zend_object *kislay_async_http_create_object(zend_class_entry *ce) {
+    php_kislay_async_http_t *async_http = reinterpret_cast<php_kislay_async_http_t *>(
+        ecalloc(1, sizeof(php_kislay_async_http_t) + zend_object_properties_size(ce)));
+    zend_object_std_init(&async_http->std, ce);
+    object_properties_init(&async_http->std, ce);
+    async_http->std.handlers = &kislay_async_http_handlers;
+    async_http->curl = nullptr;
+    async_http->headers = nullptr;
+    return &async_http->std;
+}
+
+static void kislay_async_http_free_obj(zend_object *object) {
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(object);
+    if (async_http->curl) {
+        curl_easy_cleanup(async_http->curl);
+    }
+    if (async_http->headers) {
+        curl_slist_free_all(async_http->headers);
+    }
+    async_http->response_body.~basic_string();
+    zend_object_std_dtor(&async_http->std);
 }
 
 static std::string kislay_to_upper(const std::string &value) {
@@ -319,6 +381,9 @@ static std::string kislay_to_lower(const std::string &value) {
 }
 
 static std::string kislay_url_decode(const std::string &value) {
+    if (value.empty()) {
+        return "";
+    }
     std::string out = value;
     size_t new_len = php_url_decode(&out[0], out.size());
     out.resize(new_len);
@@ -381,6 +446,40 @@ static std::string kislay_normalize_prefix(const std::string &prefix) {
         out.pop_back();
     }
     return out;
+}
+
+static bool kislay_request_is_json(php_kislay_request_t *req) {
+    auto it = req->headers.find("content-type");
+    if (it == req->headers.end()) {
+        return false;
+    }
+    std::string ct = kislay_to_lower(it->second);
+    return ct.find("application/json") != std::string::npos;
+}
+
+static bool kislay_request_parse_json(php_kislay_request_t *req) {
+    if (req->json_cached) {
+        return req->json_valid;
+    }
+    req->json_cached = true;
+    req->json_valid = false;
+    ZVAL_NULL(&req->json_cache);
+
+    if (req->body.empty() || !kislay_request_is_json(req)) {
+        return false;
+    }
+
+    zval decoded;
+    ZVAL_NULL(&decoded);
+    php_json_decode_ex(&decoded, req->body.c_str(), req->body.size(), PHP_JSON_OBJECT_AS_ARRAY, 512);
+    if (JSON_G(error_code) != PHP_JSON_ERROR_NONE) {
+        zval_ptr_dtor(&decoded);
+        return false;
+    }
+
+    ZVAL_COPY_VALUE(&req->json_cache, &decoded);
+    req->json_valid = true;
+    return true;
 }
 
 static bool kislay_build_route(const std::string &pattern, kislay::Route *route) {
@@ -596,14 +695,22 @@ static int kislay_begin_request(struct mg_connection *conn) {
     std::string uri = info->local_uri ? info->local_uri : (info->request_uri ? info->request_uri : "");
     std::string query = info->query_string ? info->query_string : "";
 
+    // Fast path for simple routes - DISABLED to ensure all requests go through PHP
+    // if (method == "GET" && uri == "/hello") {
+    //     mg_printf(conn, "HTTP/1.1 200 OK\r\n"
+    //                     "Content-Type: text/plain\r\n"
+    //                     "Content-Length: 11\r\n"
+    //                     "Connection: close\r\n"
+    //                     "\r\n"
+    //                     "Hello World");
+    //     return 1;
+    // }
+
     if (app->cors_enabled && method == "OPTIONS") {
-        zval res_obj;
-        object_init_ex(&res_obj, kislay_response_ce);
-        php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ(res_obj));
-        res->status_code = 200;
-        res->body.clear();
-        kislay_send_response(conn, res, app->cors_enabled);
-        zval_ptr_dtor(&res_obj);
+        mg_printf(conn, "HTTP/1.1 200 OK\r\n"
+                        "Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+                        "Content-Length: 0\r\n"
+                        "\r\n");
         return 1;
     }
 
@@ -685,27 +792,38 @@ static int kislay_begin_request(struct mg_connection *conn) {
 
         kislay_copy_middleware_list(app->middleware, app_middleware);
 
-        for (auto &route : app->routes) {
-            if (route.method != req->method) {
-                continue;
-            }
-            std::smatch match;
-            if (!std::regex_match(uri, match, route.regex)) {
-                continue;
-            }
+        std::string exact_key = req->method + " " + uri;
+        auto exact_it = app->exact_routes.find(exact_key);
+        if (exact_it != app->exact_routes.end() && exact_it->second < app->routes.size()) {
+            const auto &route = app->routes[exact_it->second];
             route_param_names = route.param_names;
             route_param_values.clear();
-            for (size_t i = 0; i < route.param_names.size(); ++i) {
-                if (i + 1 < match.size()) {
-                    route_param_values.push_back(match[i + 1].str());
-                } else {
-                    route_param_values.push_back("");
-                }
-            }
             kislay_copy_middleware_list(route.middleware, route_middleware);
             ZVAL_COPY(&route_handler, &route.handler);
             route_matched = true;
-            break;
+        } else {
+            for (auto &route : app->routes) {
+                if (route.method != req->method) {
+                    continue;
+                }
+                std::smatch match;
+                if (!std::regex_match(uri, match, route.regex)) {
+                    continue;
+                }
+                route_param_names = route.param_names;
+                route_param_values.clear();
+                for (size_t i = 0; i < route.param_names.size(); ++i) {
+                    if (i + 1 < match.size()) {
+                        route_param_values.push_back(match[i + 1].str());
+                    } else {
+                        route_param_values.push_back("");
+                    }
+                }
+                kislay_copy_middleware_list(route.middleware, route_middleware);
+                ZVAL_COPY(&route_handler, &route.handler);
+                route_matched = true;
+                break;
+            }
         }
     }
 
@@ -773,6 +891,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_void, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_request_get, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_request_json, 0, 0, 0)
+    ZEND_ARG_INFO(0, default)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_response_set_body, 0, 0, 1)
@@ -885,6 +1007,20 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_app_enable_gc, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, enabled, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_async_http_request, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, url, IS_STRING, 0)
+    ZEND_ARG_ARRAY_INFO(0, data, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_async_http_set_header, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_app_enable_async, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, enabled, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 PHP_METHOD(KislayRequest, getMethod) {
     php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(getThis()));
     RETURN_STRING(req->method.c_str());
@@ -896,6 +1032,11 @@ PHP_METHOD(KislayRequest, getUri) {
 }
 
 PHP_METHOD(KislayRequest, getBody) {
+    php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(getThis()));
+    RETURN_STRING(req->body.c_str());
+}
+
+PHP_METHOD(KislayRequest, body) {
     php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(getThis()));
     RETURN_STRING(req->body.c_str());
 }
@@ -1032,6 +1173,23 @@ PHP_METHOD(KislayRequest, input) {
         RETURN_ZVAL(default_val, 1, 0);
     }
     RETURN_NULL();
+}
+
+PHP_METHOD(KislayRequest, json) {
+    zval *default_val = nullptr;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(default_val)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(getThis()));
+    if (!kislay_request_parse_json(req)) {
+        if (default_val != nullptr) {
+            RETURN_ZVAL(default_val, 1, 0);
+        }
+        RETURN_NULL();
+    }
+    RETURN_ZVAL(&req->json_cache, 1, 0);
 }
 
 PHP_METHOD(KislayRequest, all) {
@@ -1405,7 +1563,13 @@ static bool kislay_app_add_route(php_kislay_app_t *app, const std::string &metho
     }
 
     ZVAL_COPY(&route.handler, handler);
+    const bool is_exact = route.param_names.empty();
+    const std::string exact_key = route.method + " " + route.pattern;
+    size_t index = app->routes.size();
     app->routes.push_back(std::move(route));
+    if (is_exact) {
+        app->exact_routes[exact_key] = index;
+    }
     return true;
 }
 
@@ -1746,6 +1910,202 @@ PHP_METHOD(KislayApp, enableGc) {
     RETURN_TRUE;
 }
 
+PHP_METHOD(KislayApp, enableAsync) {
+    zend_bool enabled = 1;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    app->async_enabled = (enabled != 0);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislayAsyncHttp, __construct) {
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    async_http->curl = curl_easy_init();
+    if (!async_http->curl) {
+        zend_throw_exception(zend_ce_exception, "Failed to initialize curl", 0);
+        RETURN_FALSE;
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, get) {
+    zend_string *url;
+    zval *data = nullptr;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(url)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    curl_easy_setopt(async_http->curl, CURLOPT_URL, ZSTR_VAL(url));
+    curl_easy_setopt(async_http->curl, CURLOPT_HTTPGET, 1L);
+    
+    if (data) {
+        // Handle query parameters
+        smart_str query = {0};
+        zend_string *key;
+        zval *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(data), key, val) {
+            if (query.s) {
+                smart_str_appendc(&query, '&');
+            }
+            smart_str_append(&query, key);
+            smart_str_appendc(&query, '=');
+            convert_to_string(val);
+            smart_str_append(&query, Z_STR_P(val));
+        } ZEND_HASH_FOREACH_END();
+        smart_str_0(&query);
+        curl_easy_setopt(async_http->curl, CURLOPT_POSTFIELDS, ZSTR_VAL(query.s));
+        smart_str_free(&query);
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, post) {
+    zend_string *url;
+    zval *data = nullptr;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(url)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    curl_easy_setopt(async_http->curl, CURLOPT_URL, ZSTR_VAL(url));
+    curl_easy_setopt(async_http->curl, CURLOPT_POST, 1L);
+    
+    if (data) {
+        smart_str body = {0};
+        php_json_encode(&body, data, 0);
+        curl_easy_setopt(async_http->curl, CURLOPT_POSTFIELDS, ZSTR_VAL(body.s));
+        smart_str_free(&body);
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, put) {
+    zend_string *url;
+    zval *data = nullptr;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(url)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    curl_easy_setopt(async_http->curl, CURLOPT_URL, ZSTR_VAL(url));
+    curl_easy_setopt(async_http->curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    
+    if (data) {
+        smart_str body = {0};
+        php_json_encode(&body, data, 0);
+        curl_easy_setopt(async_http->curl, CURLOPT_POSTFIELDS, ZSTR_VAL(body.s));
+        smart_str_free(&body);
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, patch) {
+    zend_string *url;
+    zval *data = nullptr;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(url)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    curl_easy_setopt(async_http->curl, CURLOPT_URL, ZSTR_VAL(url));
+    curl_easy_setopt(async_http->curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+    
+    if (data) {
+        smart_str body = {0};
+        php_json_encode(&body, data, 0);
+        curl_easy_setopt(async_http->curl, CURLOPT_POSTFIELDS, ZSTR_VAL(body.s));
+        smart_str_free(&body);
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, delete) {
+    zend_string *url;
+    zval *data = nullptr;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(url)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(data)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    curl_easy_setopt(async_http->curl, CURLOPT_URL, ZSTR_VAL(url));
+    curl_easy_setopt(async_http->curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+    
+    if (data) {
+        smart_str body = {0};
+        php_json_encode(&body, data, 0);
+        curl_easy_setopt(async_http->curl, CURLOPT_POSTFIELDS, ZSTR_VAL(body.s));
+        smart_str_free(&body);
+    }
+}
+
+PHP_METHOD(KislayAsyncHttp, setHeader) {
+    zend_string *name, *value;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_STR(value)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    std::string header = std::string(ZSTR_VAL(name)) + ": " + ZSTR_VAL(value);
+    async_http->headers = curl_slist_append(async_http->headers, header.c_str());
+}
+
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    php_kislay_async_http_t *async_http = (php_kislay_async_http_t *)userp;
+    async_http->response_body.append((char*)contents, realsize);
+    return realsize;
+}
+
+PHP_METHOD(KislayAsyncHttp, execute) {
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    
+    async_http->response_body.clear();
+    curl_easy_setopt(async_http->curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(async_http->curl, CURLOPT_WRITEDATA, async_http);
+    curl_easy_setopt(async_http->curl, CURLOPT_HTTPHEADER, async_http->headers);
+    
+    CURLcode res = curl_easy_perform(async_http->curl);
+    if (res != CURLE_OK) {
+        zend_throw_exception(zend_ce_exception, curl_easy_strerror(res), 0);
+        RETURN_FALSE;
+    }
+    
+    curl_easy_getinfo(async_http->curl, CURLINFO_RESPONSE_CODE, &async_http->response_code);
+    RETURN_TRUE;
+}
+
+PHP_METHOD(KislayAsyncHttp, getResponse) {
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    RETURN_STRING(async_http->response_body.c_str());
+}
+
+PHP_METHOD(KislayAsyncHttp, getResponseCode) {
+    php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
+    RETURN_LONG(async_http->response_code);
+}
+
 static const zend_function_entry kislay_request_methods[] = {
     PHP_ME(KislayRequest, getMethod, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, method, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
@@ -1756,11 +2116,13 @@ static const zend_function_entry kislay_request_methods[] = {
     PHP_ME(KislayRequest, query, arginfo_kislay_request_query, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, getQueryParams, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, getBody, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayRequest, body, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, getParams, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, getHeaders, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, getHeader, arginfo_kislay_request_get_header, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, header, arginfo_kislay_request_header, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, input, arginfo_kislay_request_input, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayRequest, json, arginfo_kislay_request_json, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, all, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, has, arginfo_kislay_request_has, ZEND_ACC_PUBLIC)
     PHP_ME(KislayRequest, only, arginfo_kislay_request_only, ZEND_ACC_PUBLIC)
@@ -1805,8 +2167,23 @@ static const zend_function_entry kislay_app_methods[] = {
     PHP_ME(KislayApp, setMemoryLimit, arginfo_kislay_app_set_memory_limit, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, getMemoryLimit, arginfo_kislay_app_get_memory_limit, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, enableGc, arginfo_kislay_app_enable_gc, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayApp, enableAsync, arginfo_kislay_app_enable_async, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, listen, arginfo_kislay_app_listen, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, stop, arginfo_kislay_void, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+static const zend_function_entry kislay_async_http_methods[] = {
+    PHP_ME(KislayAsyncHttp, __construct, arginfo_kislay_void, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, get, arginfo_kislay_async_http_request, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, post, arginfo_kislay_async_http_request, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, put, arginfo_kislay_async_http_request, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, patch, arginfo_kislay_async_http_request, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, delete, arginfo_kislay_async_http_request, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, setHeader, arginfo_kislay_async_http_set_header, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, execute, arginfo_kislay_void, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, getResponse, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayAsyncHttp, getResponseCode, arginfo_kislay_request_get, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -1841,6 +2218,13 @@ PHP_MINIT_FUNCTION(kislayphp_extension) {
     std::memcpy(&kislay_app_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_app_handlers.offset = XtOffsetOf(php_kislay_app_t, std);
     kislay_app_handlers.free_obj = kislay_app_free_obj;
+
+    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "AsyncHttp", kislay_async_http_methods);
+    kislay_async_http_ce = zend_register_internal_class(&ce);
+    kislay_async_http_ce->create_object = kislay_async_http_create_object;
+    std::memcpy(&kislay_async_http_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    kislay_async_http_handlers.offset = XtOffsetOf(php_kislay_async_http_t, std);
+    kislay_async_http_handlers.free_obj = kislay_async_http_free_obj;
 
     return SUCCESS;
 }

@@ -34,7 +34,21 @@ PHP HTTP server, HTTPS server, C++ PHP extension, routing middleware, lightweigh
 
 ## Installation
 
-### Dependencies
+### Via PECL
+
+```bash
+pecl install kislayphp_extension
+```
+
+Then add to your php.ini:
+
+```ini
+extension=kislayphp_extension.so
+```
+
+### Manual Build
+
+#### Dependencies
 
 - civetweb (vendored in this repo)
 - OpenSSL development headers

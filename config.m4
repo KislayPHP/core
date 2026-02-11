@@ -7,6 +7,12 @@ PHP_ARG_WITH([civetweb],
   [yes],
   [no])
 
+PHP_ARG_WITH([curl],
+  [for curl support],
+  [AS_HELP_STRING([--with-curl[=DIR]], [Path to curl install prefix])],
+  [yes],
+  [no])
+
 if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
   PHP_REQUIRE_CXX()
 
@@ -17,6 +23,21 @@ if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
     else
       CIVETWEB_INCLUDE_DIR=`pwd`/third_party/civetweb/include
       PHP_ADD_INCLUDE($CIVETWEB_INCLUDE_DIR)
+    fi
+  fi
+
+  if test "$PHP_CURL" != "no"; then
+    if test "$PHP_CURL" != "yes"; then
+      CURL_DIR=$PHP_CURL
+      PHP_ADD_INCLUDE($CURL_DIR/include)
+      PHP_ADD_LIBRARY_WITH_PATH(curl, $CURL_DIR/lib, KISLAYPHP_EXTENSION_SHARED_LIBADD)
+    else
+      PHP_CHECK_LIBRARY(curl, curl_easy_init,
+      [
+        PHP_ADD_LIBRARY(curl,, KISLAYPHP_EXTENSION_SHARED_LIBADD)
+      ],[
+        AC_MSG_ERROR([curl library not found])
+      ])
     fi
   fi
 

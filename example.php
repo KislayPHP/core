@@ -14,6 +14,7 @@ $app->enableGc(true);
 
 $app->use(function ($req, $res, $next) {
     // Global middleware
+    echo "Incoming request: " . $req->method() . " " . $req->path() . "\n";
     $req->setAttribute('startTime', microtime(true));
     $next();
 });
@@ -62,6 +63,7 @@ $app->group('/api', function ($app) {
 ]);
 
 $app->get('/inspect', function ($req, $res) {
+    echo   "Inspecting request...\n";
     $payload = [
         'method' => $req->method(),
         'path' => $req->path(),
@@ -75,7 +77,7 @@ $app->get('/inspect', function ($req, $res) {
 });
 
 // HTTP only
-$app->listen('0.0.0.0', 8080);
+$app->listen('0.0.0.0', 8081);
 
 // HTTPS example (requires civetweb built with OpenSSL)
 // $app->listen('0.0.0.0', 8443, ['cert' => '/path/to/cert.pem', 'key' => '/path/to/key.pem']);
