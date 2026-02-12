@@ -1,0 +1,56 @@
+{
+    "name": "kislayphp/core",
+    "description": "High-performance C++ PHP extension providing HTTP/HTTPS server with routing and middleware for PHP microservices",
+    "type": "php-ext",
+    "license": "Apache-2.0",
+    "keywords": [
+        "php",
+        "microservices",
+        "php-extension",
+        "c++-extension",
+        "http-server",
+        "https-server",
+        "php-microservices",
+        "high-performance",
+        "php-api",
+        "php-routing",
+        "php-middleware",
+        "php-echo-system",
+        "distributed-php",
+        "php-container",
+        "php-tls",
+        "php-ssl"
+    ],
+    "homepage": "https://github.com/KislayPHP/core",
+    "authors": [
+        {
+            "name": "KislayPHP Team",
+            "email": "team@kislayphp.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "provide": {
+        "ext-kislayphp_extension": "*"
+    },
+    "suggest": {
+        "kislayphp/eventbus": "Real-time communication for microservices",
+        "kislayphp/config": "Dynamic configuration management",
+        "kislayphp/discovery": "Service discovery and registration",
+        "kislayphp/gateway": "API gateway with load balancing",
+        "kislayphp/metrics": "Comprehensive metrics collection",
+        "kislayphp/queue": "Message queuing and job processing"
+    },
+    "support": {
+        "issues": "https://github.com/KislayPHP/core/issues",
+        "source": "https://github.com/KislayPHP/core",
+        "docs": "https://github.com/KislayPHP/core/blob/main/README.md"
+    },
+    "extra": {
+        "php-ext": {
+            "extension-name": "kislayphp_extension",
+            "configure-options": []
+        }
+    }
+}
