@@ -2,7 +2,7 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Performance](https://img.shields.io/badge/Performance-6.6M%20req%2Fsec-orange.svg)]()
+[![Performance](https://img.shields.io/badge/Performance-63K%20req%2Fsec-orange.svg)]()
 [![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/core/ci.yml)](https://github.com/KislayPHP/core/actions)
 [![codecov](https://codecov.io/gh/KislayPHP/core/branch/main/graph/badge.svg)](https://codecov.io/gh/KislayPHP/core)
 
@@ -10,7 +10,7 @@ A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with 
 
 ## ⚡ Key Features
 
-- 🚀 **High Performance**: 6.6M requests/second with 0.25ms P95 latency
+- 🚀 **High Performance**: Up to 63K requests/second at 200 concurrency with 0.25ms P95 latency
 - 🔒 **Secure**: Built-in HTTPS/SSL support with TLS encryption
 - 🛠️ **Full PHP Compatibility**: Complete PHP processing without fast-path bypass
 - 🏗️ **Microservices Ready**: Lightweight server for containerized deployments
