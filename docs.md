@@ -20,9 +20,9 @@ The KislayPHP Core extension provides high-performance HTTP/HTTPS server capabil
 
 ## Installation
 
-### Via PECL
+### Via PIE
 ```bash
-pecl install kislayphp_extension
+pie install kislayphp/core
 ```
 
 ### Manual Build

@@ -21,10 +21,10 @@ A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with 
 
 ## 📦 Installation
 
-### Via PECL (Recommended)
+### Via PIE (Recommended)
 
 ```bash
-pecl install kislayphp_extension
+pie install kislayphp/core
 ```
 
 Add to your `php.ini`:
@@ -47,7 +47,6 @@ sudo make install
 
 ```dockerfile
 FROM php:8.2-cli
-RUN pecl install kislayphp_extension && docker-php-ext-enable kislayphp_extension
 ```
 
 ## 🚀 Quick Start
