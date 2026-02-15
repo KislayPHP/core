@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Performance](https://img.shields.io/badge/Performance-63K%20req%2Fsec-orange.svg)]()
 [![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/core/ci.yml)](https://github.com/KislayPHP/core/actions)
+[![Ecosystem Validation](https://img.shields.io/github/actions/workflow/status/KislayPHP/core/ci.yml?branch=main&job=ecosystem&label=Ecosystem%20Validation)](https://github.com/KislayPHP/core/actions/workflows/ci.yml)
 
 A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with routing and middleware for building lightweight microservices and APIs. Built on CivetWeb with full PHP compatibility and enterprise-grade performance.
 
@@ -66,6 +67,12 @@ $app->use(function ($req, $res, $next) {
     $next();
 });
 
+// Path-scoped middleware (Express-style)
+$app->use('/api', function ($req, $res, $next) {
+    $res->set('X-Powered-By', 'KislayPHP');
+    $next();
+});
+
 // Define routes
 $app->get('/api/users', function ($req, $res) {
     $users = [
@@ -82,6 +89,26 @@ $app->post('/api/users', function ($req, $res) {
 
 // Start server
 $app->listen('0.0.0.0', 8080);
+```
+
+Express-inspired routing helpers:
+
+```php
+// Match all HTTP methods on one path
+$app->all('/health', function ($req, $res) {
+    $res->sendStatus(204); // sets code + standard status text body
+});
+```
+
+Non-blocking lifecycle:
+
+```php
+$app->listenAsync('0.0.0.0', 8080);
+
+// do startup tasks, health checks, etc.
+if ($app->isRunning()) {
+    $app->wait(); // block until stopped (or use $app->wait(5000) timeout)
+}
 ```
 
 ## 🏗️ Architecture
@@ -146,6 +173,133 @@ php run-tests.php
 # Run benchmarks
 cd tests/
 php benchmark.php --duration=60 --concurrency=100
+```
+
+## ⚡ Local Benchmark Harness
+
+Use the built-in benchmark harness to measure throughput and latency after each runtime change.
+
+```bash
+cd https
+make
+./bench/run_benchmark.sh
+```
+
+Environment overrides:
+
+```bash
+BENCH_TARGET_PATH=/json BENCH_DURATION=30 BENCH_CONCURRENCY=300 ./bench/run_benchmark.sh
+```
+
+Notes:
+- The runner auto-detects `wrk` first, then falls back to `ab`.
+- Install `wrk` on macOS with `brew install wrk`.
+- Reports are saved under `bench/results/`.
+
+Run endpoint comparison (`/plaintext`, `/json`, `/file`) with one command:
+
+```bash
+./bench/run_benchmark_matrix.sh
+```
+
+Or via Makefile shortcuts:
+
+```bash
+make bench
+make bench-matrix
+make bench-delta
+make bench-stable
+make bench-stable-delta
+make perf-gate
+make perf-gate-quick
+make perf-gate-release
+```
+
+Lifecycle validation tasks:
+
+```bash
+make test-lifecycle
+make task-updation
+make task-dev
+make task-ci
+make task-updation-release
+```
+
+Workflow guidance:
+
+- `make task-updation`: build + lifecycle regression suite (fastest quality check)
+- `make task-dev`: build + lifecycle regression + advisory quick perf gate
+- `make task-ci`: build + lifecycle regression + strict perf gate
+- `make task-updation-release`: build + lifecycle regression + release perf gate profile
+
+## CI Jobs
+
+- `build` job: runs extension build and standard test flow across PHP version matrix.
+- `ecosystem` job: runs strict ecosystem validation (`make task-ci`) with lifecycle checks and strict performance gate.
+- CI workflow file: `.github/workflows/ci.yml`.
+
+Update checklist:
+
+```bash
+cat UPDATION_LIST.md
+```
+
+Quick example:
+
+```bash
+BENCH_CONCURRENCY=200 BENCH_DURATION=15 ./bench/run_benchmark_matrix.sh
+```
+
+Generate before/after delta from the latest two matrix runs:
+
+```bash
+./bench/compare_benchmarks.sh
+```
+
+Run deterministic stable profiling with warmup + repeats + median aggregation:
+
+```bash
+BENCH_PROFILE=release BENCH_DURATION=20 BENCH_CONCURRENCY=100 BENCH_THREADS=4 BENCH_REPEATS=3 BENCH_WARMUP_SECONDS=5 ./bench/run_benchmark_stable.sh
+```
+
+Optional endpoints override:
+
+```bash
+BENCH_ENDPOINTS="/plaintext /json /file" ./bench/run_benchmark_stable.sh
+```
+
+Generate delta from latest two stable median reports for a profile:
+
+```bash
+PERF_PROFILE=release ./bench/compare_stable_benchmarks.sh
+```
+
+Run a performance gate (stable benchmark + stable delta + threshold checks):
+
+```bash
+make perf-gate
+make perf-gate-quick
+make perf-gate-release
+```
+
+Notes:
+- `perf-gate-quick` is advisory (soft-fail) for fast local feedback.
+- `perf-gate` and `perf-gate-release` are strict and fail on threshold breaches.
+- Gate targets auto-run stable benchmark twice (baseline + candidate) before diffing.
+
+Tune gate thresholds (defaults shown):
+
+```bash
+PERF_GATE_MAX_REQ_REGRESSION_PCT=5 \
+PERF_GATE_MAX_P95_REGRESSION_PCT=20 \
+PERF_GATE_MAX_P99_REGRESSION_PCT=30 \
+make perf-gate
+```
+
+Exclude noisy endpoints when needed (space-separated):
+
+```bash
+PERF_GATE_EXCLUDE_ENDPOINTS="/file" make perf-gate-quick
 ```
 
 ## 🤝 Contributing

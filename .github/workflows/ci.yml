@@ -45,3 +45,32 @@ jobs:
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
+
+  ecosystem:
+    name: Ecosystem Validation
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.3'
+        extensions: mbstring, intl
+        tools: phpize, composer
+
+    - name: Install dependencies and benchmark tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev zlib1g-dev libcurl4-openssl-dev apache2-utils wrk
+
+    - name: Build extension
+      run: |
+        phpize
+        ./configure
+        make
+
+    - name: Run strict ecosystem workflow
+      run: |
+        make task-ci
