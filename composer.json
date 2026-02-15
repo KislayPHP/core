@@ -7,7 +7,7 @@
         "php",
         "microservices",
         "php-extension",
-        "c++-extension",
+        "cpp-extension",
         "http-server",
         "https-server",
         "php-microservices",
