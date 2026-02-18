@@ -2,13 +2,13 @@
 
 ## Overview
 
-The KislayPHP Core extension provides high-performance HTTP/HTTPS server capabilities built on top of CivetWeb. It implements a hybrid threading model combining synchronous PHP execution with asynchronous I/O for optimal performance.
+The KislayPHP Core extension provides high-performance HTTP/HTTPS server capabilities built on top of embedded HTTP server. It implements a hybrid threading model combining synchronous PHP execution with asynchronous I/O for optimal performance.
 
 ## Architecture
 
 ### Threading Model
 - **Single-threaded PHP VM**: Each request runs in its own PHP context
-- **CivetWeb socket multiplexing**: Efficient handling of concurrent connections
+- **embedded HTTP server socket multiplexing**: Efficient handling of concurrent connections
 - **Configurable thread pool**: Default 1 thread, scalable up to system limits
 - **Memory isolation**: Each request has its own memory space
 
@@ -799,9 +799,9 @@ $app->listen('0.0.0.0', 8080);
 
 ## Migration Guide
 
-### From Express.js
+### From KislayPHP
 ```javascript
-// Express.js
+// KislayPHP
 app.get('/users/:id', (req, res) => {
     res.json({ id: req.params.id });
 });
@@ -813,9 +813,9 @@ $app->get('/users/:id', function($req, $res) {
 });
 ```
 
-### From Laravel
+### From KislayPHP
 ```php
-// Laravel
+// KislayPHP
 Route::get('/users/{id}', function($id) {
     return response()->json(['id' => $id]);
 });
@@ -827,9 +827,9 @@ $app->get('/users/:id', function($req, $res) {
 });
 ```
 
-### From Flask
+### From KislayPHP
 ```python
-# Flask
+# KislayPHP
 @app.route('/users/<id>')
 def get_user(id):
     return jsonify({'id': id})

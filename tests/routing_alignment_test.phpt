@@ -1,5 +1,5 @@
 --TEST--
-KislayPHP Core Express-style all/use(path)/sendStatus
+KislayPHP Core routing-style all/use(path)/sendStatus
 --SKIPIF--
 <?php
 if (!extension_loaded('kislayphp_extension')) {

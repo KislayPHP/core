@@ -19,9 +19,9 @@ Thank you for your interest in contributing to KislayPHP Core! This document pro
 
 - PHP 8.2+
 - C++ compiler (GCC 9+ or Clang 11+)
-- OpenSSL development libraries
+- TLS library development libraries
 - zlib development libraries
-- libcurl development libraries
+- HTTP client library development libraries
 
 ### Building from Source
 

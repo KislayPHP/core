@@ -6,7 +6,7 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/KislayPHP/core/ci.yml)](https://github.com/KislayPHP/core/actions)
 [![Ecosystem Validation](https://img.shields.io/github/actions/workflow/status/KislayPHP/core/ci.yml?branch=main&job=ecosystem&label=Ecosystem%20Validation)](https://github.com/KislayPHP/core/actions/workflows/ci.yml)
 
-A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with routing and middleware for building lightweight microservices and APIs. Built on CivetWeb with full PHP compatibility and enterprise-grade performance.
+A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with routing and middleware for building lightweight microservices and APIs. Built on embedded HTTP server with full PHP compatibility and enterprise-grade performance.
 
 ## ⚡ Key Features
 
@@ -43,9 +43,9 @@ make
 sudo make install
 ```
 
-### Docker
+### container
 
-```dockerfile
+```containerfile
 FROM php:8.2-cli
 ```
 
@@ -66,7 +66,7 @@ $app->use(function ($req, $res, $next) {
     $next();
 });
 
-// Path-scoped middleware (Express-style)
+// Path-scoped middleware (KislayPHP)
 $app->use('/api', function ($req, $res, $next) {
     $res->set('X-Powered-By', 'KislayPHP');
     $next();
@@ -90,7 +90,7 @@ $app->post('/api/users', function ($req, $res) {
 $app->listen('0.0.0.0', 8080);
 ```
 
-Express-inspired routing helpers:
+KislayPHP routing helpers:
 
 ```php
 // Match all HTTP methods on one path
@@ -120,7 +120,7 @@ KislayPHP Core implements a hybrid threading model combining PHP execution with 
 │   Thread 1      │    │   Thread N      │
 │                 │    │                 │
 │ ┌─────────────┐ │    │ ┌─────────────┐ │
-│ │ CivetWeb    │ │    │ │ CivetWeb    │ │
+│ │ embedded HTTP server    │ │    │ │ embedded HTTP server    │ │
 │ │ Server      │ │    │ │ Server      │ │
 │ │ Socket      │ │    │ │ Socket      │ │
 │ │ Multiplex   │ │    │ │ Multiplex   │ │
@@ -317,9 +317,9 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## 🙏 Acknowledgments
 
-- **CivetWeb**: Embedded HTTP server library
+- **embedded HTTP server**: Embedded HTTP server library
 - **PHP**: Zend API for extension development
-- **OpenSSL**: SSL/TLS encryption support
+- **TLS library**: SSL/TLS encryption support
 
 ---
 

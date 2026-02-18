@@ -9,5 +9,5 @@ php $PHP_EXTS https/tests/lifecycle_async_test.php
 php -n https/run-tests.php -n $PHP_EXTS https/tests/lifecycle_async_test.phpt
 php -n https/run-tests.php -n $PHP_EXTS https/tests/lifecycle_wait_invalid_test.phpt
 php -n https/run-tests.php -n $PHP_EXTS https/tests/lifecycle_double_listen_test.phpt
-php -n https/run-tests.php -n $PHP_EXTS https/tests/express_alignment_test.phpt
+php -n https/run-tests.php -n $PHP_EXTS https/tests/routing_alignment_test.phpt
 ```
