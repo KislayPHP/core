@@ -93,6 +93,7 @@ $app->listen('0.0.0.0', 8080);
 `num_threads` note:
 - On non-thread-safe PHP builds (`Thread Safety => disabled`), values above `1` are automatically clamped to `1` to prevent middleware/route instability.
 - Invalid option values now fall back to safe defaults with runtime warnings instead of hard failures.
+- On non-thread-safe PHP builds, `listen()`/`listenAsync()` enable NTS compatibility mode (disables Zend stack guard) to prevent request-time internal recursion errors.
 
 Request log format (enable via `$app->setOption('log', true)`):
 - `[kislay] time="YYYY-MM-DD HH:MM:SS.mmm" request="METHOD /path" response="STATUS BYTES" duration_ms=NN error="..."`

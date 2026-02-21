@@ -717,6 +717,14 @@ class IntegrationTest extends PHPUnit\\Framework\\TestCase {
 3. Enable garbage collection: `$app->enableGc(true)`
 4. Monitor memory usage: `php -r "echo memory_get_peak_usage(true) / 1024 / 1024 . 'MB';"`
 
+#### Thread Safety Disabled (NTS)
+**Symptoms:** Requests return 500 with stack-size or recursion-related internal errors.
+
+**Behavior in v0.1.6+:**
+1. `num_threads > 1` is automatically clamped to `1` with a runtime warning.
+2. `listen()`/`listenAsync()` enable NTS compatibility mode by disabling Zend stack guard.
+3. Server continues running in compatibility mode instead of failing startup.
+
 #### SSL/TLS Issues
 **Error:** `SSL handshake failed`
 

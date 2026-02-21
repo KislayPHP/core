@@ -267,6 +267,16 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
     return true;
 }
 
+static void kislay_disable_stack_guard_for_nts(const char *source) {
+#if !defined(ZTS)
+    (void) source;
+    EG(max_allowed_stack_size) = -1;
+    EG(stack_limit) = nullptr;
+#else
+    (void) source;
+#endif
+}
+
 static bool kislay_path_is_directory(const std::string &path) {
     if (path.empty()) {
         return false;
@@ -1205,15 +1215,81 @@ static void kislay_send_response(struct mg_connection *conn, php_kislay_response
     }
 }
 
-static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *retval) {
+static std::string kislay_callable_debug_name(zval *callable) {
+    if (callable == nullptr) {
+        return "<null>";
+    }
+    switch (Z_TYPE_P(callable)) {
+        case IS_STRING:
+            return std::string(Z_STRVAL_P(callable), Z_STRLEN_P(callable));
+        case IS_ARRAY: {
+            zval *first = zend_hash_index_find(Z_ARRVAL_P(callable), 0);
+            zval *second = zend_hash_index_find(Z_ARRVAL_P(callable), 1);
+            std::string left = "<invalid>";
+            std::string right = "<invalid>";
+            if (first != nullptr) {
+                if (Z_TYPE_P(first) == IS_OBJECT) {
+                    left = std::string(ZSTR_VAL(Z_OBJCE_P(first)->name));
+                } else if (Z_TYPE_P(first) == IS_STRING) {
+                    left = std::string(Z_STRVAL_P(first), Z_STRLEN_P(first));
+                }
+            }
+            if (second != nullptr && Z_TYPE_P(second) == IS_STRING) {
+                right = std::string(Z_STRVAL_P(second), Z_STRLEN_P(second));
+            }
+            return left + "::" + right;
+        }
+        case IS_OBJECT:
+            return std::string(ZSTR_VAL(Z_OBJCE_P(callable)->name));
+        default:
+            return std::string("<type:") + zend_get_type_by_const(Z_TYPE_P(callable)) + ">";
+    }
+}
+
+static std::string kislay_exception_debug_string() {
+    if (EG(exception) == nullptr) {
+        return "";
+    }
+    zend_object *exception = EG(exception);
+    std::string class_name = exception->ce != nullptr ? std::string(ZSTR_VAL(exception->ce->name)) : "Exception";
+    zval rv;
+    zval *msg = zend_read_property(exception->ce, exception, ZEND_STRL("message"), 1, &rv);
+    std::string out = class_name;
+    if (msg != nullptr && Z_TYPE_P(msg) == IS_STRING && Z_STRLEN_P(msg) > 0) {
+        out += ": " + std::string(Z_STRVAL_P(msg), Z_STRLEN_P(msg));
+    }
+    zval rv_file;
+    zval *file = zend_read_property(exception->ce, exception, ZEND_STRL("file"), 1, &rv_file);
+    zval rv_line;
+    zval *line = zend_read_property(exception->ce, exception, ZEND_STRL("line"), 1, &rv_line);
+    if (file != nullptr && Z_TYPE_P(file) == IS_STRING && line != nullptr && Z_TYPE_P(line) == IS_LONG) {
+        out += " @ ";
+        out += std::string(Z_STRVAL_P(file), Z_STRLEN_P(file));
+        out += ":";
+        out += std::to_string(static_cast<long long>(Z_LVAL_P(line)));
+    }
+    return out;
+}
+
+static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *retval, std::string *error_out = nullptr) {
     ZVAL_UNDEF(retval);
     if (call_user_function(EG(function_table), nullptr, callable, retval, argc, argv) == FAILURE) {
+        if (error_out != nullptr) {
+            *error_out = "call_user_function failed for callable " + kislay_callable_debug_name(callable);
+            std::string exception_text = kislay_exception_debug_string();
+            if (!exception_text.empty()) {
+                *error_out += " (" + exception_text + ")";
+            }
+        }
         return false;
+    }
+    if (error_out != nullptr && EG(exception) != nullptr) {
+        *error_out = "exception in callable " + kislay_callable_debug_name(callable) + " (" + kislay_exception_debug_string() + ")";
     }
     return true;
 }
 
-static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_obj, zval *res_obj) {
+static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_obj, zval *res_obj, std::string *error_out = nullptr) {
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(res_obj));
     for (const auto &mw : list) {
         bool next_called = false;
@@ -1228,7 +1304,8 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
         ZVAL_COPY(&args[2], &next_obj);
 
         zval retval;
-        bool ok = kislay_call_php(const_cast<zval *>(&mw), 3, args, &retval);
+        std::string middleware_error;
+        bool ok = kislay_call_php(const_cast<zval *>(&mw), 3, args, &retval, &middleware_error);
 
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
@@ -1237,7 +1314,14 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
             zval_ptr_dtor(&retval);
         }
 
-        if (!ok || EG(exception)) {
+        const bool had_exception = (EG(exception) != nullptr);
+        if (!ok || had_exception) {
+            if (error_out != nullptr) {
+                *error_out = middleware_error.empty() ? "middleware callback failed" : middleware_error;
+            }
+            if (!had_exception && !middleware_error.empty()) {
+                php_error_docref(nullptr, E_WARNING, "Kislay middleware execution failed: %s", middleware_error.c_str());
+            }
             kislay_mark_internal_error(res);
             return false;
         }
@@ -1245,6 +1329,9 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
             if (!kislay_response_has_content(res)) {
                 res->status_code = 500;
                 res->body = "Middleware chain stopped without response";
+            }
+            if (error_out != nullptr && error_out->empty()) {
+                *error_out = "middleware stopped without calling next()";
             }
             return false;
         }
@@ -1269,7 +1356,7 @@ static bool kislay_handle_route(php_kislay_app_t *app, const std::string &method
         php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(req_obj));
         kislay_request_fill_params(req, route, match);
         if (!route.middleware.empty()) {
-            if (!kislay_run_middleware_list(route.middleware, req_obj, res_obj)) {
+            if (!kislay_run_middleware_list(route.middleware, req_obj, res_obj, nullptr)) {
                 return false;
             }
         }
@@ -1278,7 +1365,7 @@ static bool kislay_handle_route(php_kislay_app_t *app, const std::string &method
         ZVAL_COPY(&args[0], req_obj);
         ZVAL_COPY(&args[1], res_obj);
         zval retval;
-        bool ok = kislay_call_php(&route.handler, 2, args, &retval);
+        bool ok = kislay_call_php(&route.handler, 2, args, &retval, nullptr);
         zval_ptr_dtor(&args[0]);
         zval_ptr_dtor(&args[1]);
         if (ok) {
@@ -1516,7 +1603,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
         }
     }
 
-    run_routes = kislay_run_middleware_list(*app_middleware, &req_obj, &res_obj);
+    run_routes = kislay_run_middleware_list(*app_middleware, &req_obj, &res_obj, &request_error);
     if (run_routes && !app->path_middleware.empty()) {
         std::vector<zval> scoped_middleware;
         scoped_middleware.reserve(app->path_middleware.size());
@@ -1527,7 +1614,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
             }
         }
         if (!scoped_middleware.empty()) {
-            run_routes = kislay_run_middleware_list(scoped_middleware, &req_obj, &res_obj);
+            run_routes = kislay_run_middleware_list(scoped_middleware, &req_obj, &res_obj, &request_error);
             for (auto &mw : scoped_middleware) {
                 zval_ptr_dtor(&mw);
             }
@@ -1535,20 +1622,26 @@ static int kislay_begin_request(struct mg_connection *conn) {
     }
     if (run_routes && route_handler != nullptr) {
         if (route_middleware != nullptr && !route_middleware->empty()) {
-            run_routes = kislay_run_middleware_list(*route_middleware, &req_obj, &res_obj);
+            run_routes = kislay_run_middleware_list(*route_middleware, &req_obj, &res_obj, &request_error);
         }
         if (run_routes) {
             zval args[2];
             ZVAL_COPY(&args[0], &req_obj);
             ZVAL_COPY(&args[1], &res_obj);
             zval retval;
-            bool ok = kislay_call_php(const_cast<zval *>(route_handler), 2, args, &retval);
+            std::string handler_error;
+            bool ok = kislay_call_php(const_cast<zval *>(route_handler), 2, args, &retval, &handler_error);
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&args[1]);
             if (ok) {
                 zval_ptr_dtor(&retval);
             }
-            if (!ok || EG(exception)) {
+            const bool had_exception = (EG(exception) != nullptr);
+            if (!ok || had_exception) {
+                request_error = handler_error.empty() ? "route callback failed" : handler_error;
+                if (!had_exception && !request_error.empty()) {
+                    php_error_docref(nullptr, E_WARNING, "Kislay route execution failed: %s", request_error.c_str());
+                }
                 kislay_mark_internal_error(res);
                 run_routes = false;
             } else {
@@ -3097,6 +3190,7 @@ PHP_METHOD(KislayApp, listen) {
         key_path = app->default_tls_key;
     }
     app->document_root = kislay_sanitize_document_root(app->document_root, "", "Kislay\\Core\\App::listen");
+    kislay_disable_stack_guard_for_nts("Kislay\\Core\\App::listen");
     kislay_sanitize_tls_paths(&cert_path, &key_path, "Kislay\\Core\\App::listen");
     app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listen");
     app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listen");
@@ -3160,6 +3254,7 @@ PHP_METHOD(KislayApp, listenAsync) {
         key_path = app->default_tls_key;
     }
     app->document_root = kislay_sanitize_document_root(app->document_root, "", "Kislay\\Core\\App::listenAsync");
+    kislay_disable_stack_guard_for_nts("Kislay\\Core\\App::listenAsync");
     kislay_sanitize_tls_paths(&cert_path, &key_path, "Kislay\\Core\\App::listenAsync");
     app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listenAsync");
     app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listenAsync");

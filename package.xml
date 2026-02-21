@@ -16,15 +16,15 @@
   </lead>
   <date>2026-02-21</date>
   <version>
-    <release>0.1.5</release>
-    <api>0.1.5</api>
+    <release>0.1.6</release>
+    <api>0.1.6</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Added safe config fallbacks with warnings, structured request logging, and document_root/TLS dependency validation.</notes>
+  <notes>Added NTS compatibility mode (stack-guard disable), improved callback diagnostics, and stabilized middleware/route execution on Linux NTS builds.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />
