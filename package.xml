@@ -16,15 +16,15 @@
   </lead>
   <date>2026-02-21</date>
   <version>
-    <release>0.1.3</release>
-    <api>0.1.3</api>
+    <release>0.1.4</release>
+    <api>0.1.4</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Namespace migration to Kislay\\Core with routing and error-handling improvements.</notes>
+  <notes>Stabilized middleware execution on non-ZTS PHP by forcing num_threads=1 when thread safety is disabled.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />

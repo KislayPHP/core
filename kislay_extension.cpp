@@ -434,6 +434,11 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->memory_limit_bytes = 0;
     app->gc_after_request = true;
     app->thread_count = static_cast<int>(kislay_env_long("KISLAYPHP_HTTP_THREADS", KISLAYPHP_EXTENSION_G(http_threads)));
+#if !defined(ZTS)
+    if (app->thread_count > 1) {
+        app->thread_count = 1;
+    }
+#endif
     app->read_timeout_ms = kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms));
     zend_long max_body = kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body));
     if (max_body < 0) {
@@ -2287,6 +2292,12 @@ PHP_METHOD(KislayApp, setOption) {
             zend_throw_exception(zend_ce_exception, "num_threads must be > 0", 0);
             RETURN_FALSE;
         }
+#if !defined(ZTS)
+        if (v > 1) {
+            php_error_docref(nullptr, E_WARNING, "Thread Safety is disabled; forcing num_threads=1");
+            v = 1;
+        }
+#endif
         app->thread_count = static_cast<int>(v);
         RETURN_TRUE;
     }

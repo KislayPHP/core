@@ -90,6 +90,9 @@ $app->post('/api/users', function ($req, $res) {
 $app->listen('0.0.0.0', 8080);
 ```
 
+`num_threads` note:
+- On non-thread-safe PHP builds (`Thread Safety => disabled`), values above `1` are automatically clamped to `1` to prevent middleware/route instability.
+
 Kislay routing helpers:
 
 ```php
