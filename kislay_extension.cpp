@@ -3164,35 +3164,35 @@ PHP_MINIT_FUNCTION(kislayphp_extension) {
     REGISTER_INI_ENTRIES();
     zend_class_entry ce;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "Request", kislay_request_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "Request", kislay_request_methods);
     kislay_request_ce = zend_register_internal_class(&ce);
     kislay_request_ce->create_object = kislay_request_create_object;
     std::memcpy(&kislay_request_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_request_handlers.offset = XtOffsetOf(php_kislay_request_t, std);
     kislay_request_handlers.free_obj = kislay_request_free_obj;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "Response", kislay_response_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "Response", kislay_response_methods);
     kislay_response_ce = zend_register_internal_class(&ce);
     kislay_response_ce->create_object = kislay_response_create_object;
     std::memcpy(&kislay_response_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_response_handlers.offset = XtOffsetOf(php_kislay_response_t, std);
     kislay_response_handlers.free_obj = kislay_response_free_obj;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "Next", kislay_next_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "Next", kislay_next_methods);
     kislay_next_ce = zend_register_internal_class(&ce);
     kislay_next_ce->create_object = kislay_next_create_object;
     std::memcpy(&kislay_next_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_next_handlers.offset = XtOffsetOf(php_kislay_next_t, std);
     kislay_next_handlers.free_obj = kislay_next_free_obj;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "App", kislay_app_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "App", kislay_app_methods);
     kislay_app_ce = zend_register_internal_class(&ce);
     kislay_app_ce->create_object = kislay_app_create_object;
     std::memcpy(&kislay_app_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_app_handlers.offset = XtOffsetOf(php_kislay_app_t, std);
     kislay_app_handlers.free_obj = kislay_app_free_obj;
 
-    INIT_NS_CLASS_ENTRY(ce, "KislayPHP\\Core", "AsyncHttp", kislay_async_http_methods);
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "AsyncHttp", kislay_async_http_methods);
     kislay_async_http_ce = zend_register_internal_class(&ce);
     kislay_async_http_ce->create_object = kislay_async_http_create_object;
     std::memcpy(&kislay_async_http_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));

@@ -1,5 +1,5 @@
 --TEST--
-KislayPHP\Core\App wait rejects invalid timeout
+Kislay\Core\App wait rejects invalid timeout
 --SKIPIF--
 <?php
 if (!extension_loaded('kislayphp_extension')) {
@@ -8,7 +8,7 @@ if (!extension_loaded('kislayphp_extension')) {
 ?>
 --FILE--
 <?php
-$app = new KislayPHP\Core\App();
+$app = new Kislay\Core\App();
 
 try {
     $app->wait(-2);

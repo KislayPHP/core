@@ -1,5 +1,5 @@
 --TEST--
-KislayPHP\Core\App listenAsync rejects second start while running
+Kislay\Core\App listenAsync rejects second start while running
 --SKIPIF--
 <?php
 if (!extension_loaded('kislayphp_extension')) {
@@ -38,7 +38,7 @@ function reserve_free_port() {
 $host = '127.0.0.1';
 $port = reserve_free_port();
 
-$app = new KislayPHP\Core\App();
+$app = new Kislay\Core\App();
 $app->get('/health', function ($req, $res) {
     $res->send('ok');
 });

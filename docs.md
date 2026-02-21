@@ -1,8 +1,8 @@
-# KislayPHP Core Extension Documentation
+# Kislay Core Extension Documentation
 
 ## Overview
 
-The KislayPHP Core extension provides high-performance HTTP/HTTPS server capabilities built on top of embedded HTTP server. It implements a hybrid threading model combining synchronous PHP execution with asynchronous I/O for optimal performance.
+The Kislay Core extension provides high-performance HTTP/HTTPS server capabilities built on top of embedded HTTP server. It implements a hybrid threading model combining synchronous PHP execution with asynchronous I/O for optimal performance.
 
 ## Architecture
 
@@ -48,13 +48,13 @@ kislayphp.http.tls_key = ""
 
 ## API Reference
 
-### KislayPHP\\Core\\App Class
+### Kislay\\Core\\App Class
 
 The main application class that handles HTTP routing and server management.
 
 #### Constructor
 ```php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 ```
 
 #### Routing Methods
@@ -130,7 +130,7 @@ $app->enableLogging(bool $enabled): void
 $app->enableAsync(bool $enabled): void
 ```
 
-### KislayPHP\\Core\\Request Class
+### Kislay\\Core\\Request Class
 
 Represents an HTTP request with methods to access request data.
 
@@ -185,7 +185,7 @@ $request->getAttribute(string $key, mixed $default = null): mixed
 $request->hasAttribute(string $key): bool
 ```
 
-### KislayPHP\\Core\\Response Class
+### Kislay\\Core\\Response Class
 
 Represents an HTTP response with methods to set response data.
 
@@ -220,7 +220,7 @@ $response->unprocessableEntity(string $message = ''): void // 422 Unprocessable 
 $response->internalServerError(string $message = ''): void // 500 Internal Server Error
 ```
 
-### KislayPHP\\Core\\Next Class
+### Kislay\\Core\\Next Class
 
 Used in middleware to continue processing the request chain.
 
@@ -233,7 +233,7 @@ $next();  // Continue to next middleware/route handler
 ### Basic HTTP Server
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->get('/hello', function($req, $res) {
     $res->send('Hello World!');
@@ -245,7 +245,7 @@ $app->listen('0.0.0.0', 8080);
 ### REST API with Parameters
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->get('/users/:id', function($req, $res) {
     $userId = $req->input('id');
@@ -271,7 +271,7 @@ $app->listen('0.0.0.0', 8080);
 ### Middleware Usage
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Global middleware
 $app->use(function($req, $res, $next) {
@@ -310,7 +310,7 @@ $app->listen('0.0.0.0', 8080);
 ### Route Groups
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->group('/api/v1', function($app) {
     $app->group('/users', function($app) {
@@ -343,7 +343,7 @@ $app->listen('0.0.0.0', 8080);
 ### JSON API with Validation
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->post('/register', function($req, $res) {
     // Validate JSON input
@@ -382,7 +382,7 @@ $app->listen('0.0.0.0', 8080);
 ### File Upload Handling
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->post('/upload', function($req, $res) {
     // Note: File uploads require multipart/form-data parsing
@@ -415,7 +415,7 @@ $app->listen('0.0.0.0', 8080);
 ### HTTPS Server
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Configure SSL/TLS
 $app->listen('0.0.0.0', 8443, [
@@ -475,7 +475,7 @@ $app->enableCors(true); // Enable cross-origin requests
 ### Global Error Handler
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Global error handler
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
@@ -503,7 +503,7 @@ $app->listen('0.0.0.0', 8080);
 ### Route-Specific Error Handling
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->get('/api/data', function($req, $res) {
     try {
@@ -526,7 +526,7 @@ $app->listen('0.0.0.0', 8080);
 ### Input Validation
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 $app->post('/user', function($req, $res) {
     $data = $req->all();
@@ -558,7 +558,7 @@ $app->listen('0.0.0.0', 8080);
 ### CORS Configuration
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // CORS middleware
 $app->use(function($req, $res, $next) {
@@ -584,7 +584,7 @@ $app->listen('0.0.0.0', 8080);
 ### Rate Limiting
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Simple in-memory rate limiter
 $requests = [];
@@ -625,9 +625,9 @@ $app->listen('0.0.0.0', 8080);
 ```php
 <?php
 use PHPUnit\\Framework\\TestCase;
-use KislayPHP\\Core\\App;
-use KislayPHP\\Core\\Request;
-use KislayPHP\\Core\\Response;
+use Kislay\\Core\\App;
+use Kislay\\Core\\Request;
+use Kislay\\Core\\Response;
 
 class AppTest extends TestCase {
     public function testBasicRoute() {
@@ -692,7 +692,7 @@ class IntegrationTest extends PHPUnit\\Framework\\TestCase {
 ### Common Issues
 
 #### Extension Not Loading
-**Error:** `PHP Fatal error: Class 'KislayPHP\\Core\\App' not found`
+**Error:** `PHP Fatal error: Class 'Kislay\\Core\\App' not found`
 
 **Solutions:**
 1. Check if extension is installed: `php -m | grep kislayphp`
@@ -729,7 +729,7 @@ class IntegrationTest extends PHPUnit\\Framework\\TestCase {
 ### Debug Logging
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Enable debug logging
 $app->enableLogging(true);
@@ -760,7 +760,7 @@ $app->listen('0.0.0.0', 8080);
 ### Performance Monitoring
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 
 // Request timing middleware
 $app->use(function($req, $res, $next) {
@@ -799,43 +799,43 @@ $app->listen('0.0.0.0', 8080);
 
 ## Migration Guide
 
-### From KislayPHP
+### From Kislay
 ```javascript
-// KislayPHP
+// Kislay
 app.get('/users/:id', (req, res) => {
     res.json({ id: req.params.id });
 });
 ```
 ```php
-// KislayPHP
+// Kislay
 $app->get('/users/:id', function($req, $res) {
     $res->json(['id' => $req->input('id')]);
 });
 ```
 
-### From KislayPHP
+### From Kislay
 ```php
-// KislayPHP
+// Kislay
 Route::get('/users/{id}', function($id) {
     return response()->json(['id' => $id]);
 });
 ```
 ```php
-// KislayPHP
+// Kislay
 $app->get('/users/:id', function($req, $res) {
     $res->json(['id' => $req->input('id')]);
 });
 ```
 
-### From KislayPHP
+### From Kislay
 ```python
-# KislayPHP
+# Kislay
 @app.route('/users/<id>')
 def get_user(id):
     return jsonify({'id': id})
 ```
 ```php
-// KislayPHP
+// Kislay
 $app->get('/users/:id', function($req, $res) {
     $res->json(['id' => $req->input('id')]);
 });
@@ -846,7 +846,7 @@ $app->get('/users/:id', function($req, $res) {
 ### Custom Response Types
 ```php
 <?php
-class CustomResponse extends KislayPHP\\Core\\Response {
+class CustomResponse extends Kislay\\Core\\Response {
     public function csv(array $data, int $status = 200): void {
         $this->header('Content-Type', 'text/csv');
         $this->status($status);
@@ -878,7 +878,7 @@ $app->get('/export', function($req, $res) {
 ### Async Request Handling
 ```php
 <?php
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 $app->enableAsync(true);
 
 $app->get('/async-data', function($req, $res) {
@@ -901,9 +901,9 @@ $app->listen('0.0.0.0', 8080);
 <?php
 // Note: WebSocket support requires kislayphp_eventbus extension
 
-use KislayPHP\\EventBus\\WebSocketServer;
+use Kislay\\EventBus\\WebSocketServer;
 
-$app = new KislayPHP\\Core\\App();
+$app = new Kislay\\Core\\App();
 $wsServer = new WebSocketServer();
 
 $app->get('/chat', function($req, $res) {
@@ -924,4 +924,4 @@ $wsServer->listen('0.0.0.0', 8081);
 $app->listen('0.0.0.0', 8080);
 ```
 
-This comprehensive documentation covers all aspects of the KislayPHP Core extension, from basic usage to advanced features and troubleshooting.
+This comprehensive documentation covers all aspects of the Kislay Core extension, from basic usage to advanced features and troubleshooting.

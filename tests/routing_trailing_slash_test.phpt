@@ -1,5 +1,5 @@
 --TEST--
-Kislay Core routing-style all/use(path)/sendStatus
+Kislay Core normalizes trailing slashes for route matching
 --SKIPIF--
 <?php
 if (!extension_loaded('kislayphp_extension')) {
@@ -18,30 +18,23 @@ function reserve_free_port() {
     if (!$socket) {
         fail("Unable to reserve free port: {$errstr}");
     }
-
     $name = stream_socket_get_name($socket, false);
     fclose($socket);
-
-    if (!$name || strpos($name, ':') === false) {
-        fail('Failed to determine reserved port');
-    }
-
     $parts = explode(':', $name);
     $port = (int) end($parts);
     if ($port <= 0) {
         fail('Reserved port is invalid');
     }
-
     return $port;
 }
 
-function make_request($host, $port, $method, $path) {
+function make_request($host, $port, $path) {
     $fp = @fsockopen($host, $port, $errno, $errstr, 2.0);
     if (!$fp) {
         fail("Failed to connect: {$errstr}");
     }
 
-    $request = "{$method} {$path} HTTP/1.1\r\nHost: {$host}:{$port}\r\nConnection: close\r\n\r\n";
+    $request = "GET {$path} HTTP/1.1\r\nHost: {$host}:{$port}\r\nConnection: close\r\n\r\n";
     fwrite($fp, $request);
     $response = stream_get_contents($fp);
     fclose($fp);
@@ -57,13 +50,8 @@ $host = '127.0.0.1';
 $port = reserve_free_port();
 
 $app = new Kislay\Core\App();
-$app->use('/api', function ($req, $res, $next) {
-    $res->set('X-Scoped', '1');
-    $next();
-});
-
-$app->all('/api/health', function ($req, $res) {
-    $res->sendStatus(204);
+$app->get('/health', function ($req, $res) {
+    $res->send('ok');
 });
 
 if (!$app->listenAsync($host, $port)) {
@@ -72,27 +60,23 @@ if (!$app->listenAsync($host, $port)) {
 
 usleep(150000);
 
-$getResponse = make_request($host, $port, 'GET', '/api/health');
-$postResponse = make_request($host, $port, 'POST', '/api/health');
+$withoutSlash = make_request($host, $port, '/health');
+$withSlash = make_request($host, $port, '/health/');
 
 $app->stop();
 
-$getFirstLine = strtok($getResponse, "\r\n");
-if ($getFirstLine === false || strpos($getFirstLine, '204') === false) {
-    fail("GET expected 204, got: {$getFirstLine}");
+$statusA = strtok($withoutSlash, "\r\n");
+if ($statusA === false || strpos($statusA, '200') === false) {
+    fail("Expected 200 for /health, got: {$statusA}");
 }
 
-$postFirstLine = strtok($postResponse, "\r\n");
-if ($postFirstLine === false || strpos($postFirstLine, '204') === false) {
-    fail("POST expected 204, got: {$postFirstLine}");
+$statusB = strtok($withSlash, "\r\n");
+if ($statusB === false || strpos($statusB, '200') === false) {
+    fail("Expected 200 for /health/, got: {$statusB}");
 }
 
-if (stripos($getResponse, "x-scoped: 1") === false) {
-    fail('Scoped middleware header missing for GET');
-}
-
-if (stripos($postResponse, "x-scoped: 1") === false) {
-    fail('Scoped middleware header missing for POST');
+if (strpos($withSlash, 'ok') === false) {
+    fail('Expected body for /health/');
 }
 
 echo "OK\n";

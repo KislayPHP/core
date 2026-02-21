@@ -1,4 +1,4 @@
-# KislayPHP Core
+# Kislay Core
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
@@ -55,7 +55,7 @@ FROM php:8.2-cli
 <?php
 
 // Create server instance
-$app = new KislayPHP\Core\App();
+$app = new Kislay\Core\App();
 
 // Configure server
 $app->setOption('num_threads', 4);
@@ -66,9 +66,9 @@ $app->use(function ($req, $res, $next) {
     $next();
 });
 
-// Path-scoped middleware (KislayPHP)
+// Path-scoped middleware (Kislay)
 $app->use('/api', function ($req, $res, $next) {
-    $res->set('X-Powered-By', 'KislayPHP');
+    $res->set('X-Powered-By', 'Kislay');
     $next();
 });
 
@@ -90,7 +90,7 @@ $app->post('/api/users', function ($req, $res) {
 $app->listen('0.0.0.0', 8080);
 ```
 
-KislayPHP routing helpers:
+Kislay routing helpers:
 
 ```php
 // Match all HTTP methods on one path
@@ -112,7 +112,7 @@ if ($app->isRunning()) {
 
 ## 🏗️ Architecture
 
-KislayPHP Core implements a hybrid threading model combining PHP execution with asynchronous I/O:
+Kislay Core implements a hybrid threading model combining PHP execution with asynchronous I/O:
 
 ```
 ┌─────────────────┐    ┌─────────────────┐

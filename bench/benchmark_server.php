@@ -8,7 +8,7 @@ if (!extension_loaded('kislayphp_extension')) {
 $port = (int) (getenv('BENCH_PORT') ?: 9090);
 $host = getenv('BENCH_HOST') ?: '127.0.0.1';
 
-$app = new KislayPHP\Core\App();
+$app = new Kislay\Core\App();
 
 $bigFile = __DIR__ . '/static-1mb.bin';
 if (!file_exists($bigFile)) {

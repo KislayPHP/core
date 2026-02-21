@@ -6,7 +6,7 @@
 // Load the extension (make sure the extension is properly installed and loaded in your PHP configuration)
 extension_loaded('kislayphp_extension') or die('The kislayphp_extension is not loaded');
 
-$app = new KislayPHP\Core\App();
+$app = new Kislay\Core\App();
 
 // Memory management settings
 $app->setMemoryLimit(128 * 1024 * 1024);
