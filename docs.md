@@ -720,7 +720,7 @@ class IntegrationTest extends PHPUnit\\Framework\\TestCase {
 #### Thread Safety Disabled (NTS)
 **Symptoms:** Requests return 500 with stack-size or recursion-related internal errors.
 
-**Behavior in v0.1.6+:**
+**Behavior in v0.0.1+:**
 1. `num_threads > 1` is automatically clamped to `1` with a runtime warning.
 2. `listen()`/`listenAsync()` enable NTS compatibility mode by disabling Zend stack guard.
 3. Server continues running in compatibility mode instead of failing startup.
