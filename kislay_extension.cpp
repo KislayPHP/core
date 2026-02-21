@@ -17,9 +17,11 @@ extern "C" {
 #include <civetweb.h>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <atomic>
 #include <csignal>
 #include <mutex>
@@ -33,12 +35,50 @@ extern "C" {
 #include <sys/stat.h>
 #include <unistd.h>
 
+static bool kislay_parse_long_strict(const char *value, zend_long *out) {
+    if (value == nullptr || *value == '\0' || out == nullptr) {
+        return false;
+    }
+    errno = 0;
+    char *end = nullptr;
+    long long parsed = std::strtoll(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        return false;
+    }
+    *out = static_cast<zend_long>(parsed);
+    return true;
+}
+
+static bool kislay_parse_bool_text(const char *value, bool *out) {
+    if (value == nullptr || *value == '\0' || out == nullptr) {
+        return false;
+    }
+    if (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0) {
+        *out = true;
+        return true;
+    }
+    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "FALSE") == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
 static zend_long kislay_env_long(const char *name, zend_long fallback) {
     const char *value = std::getenv(name);
     if (value == nullptr || *value == '\0') {
         return fallback;
     }
-    return static_cast<zend_long>(std::strtoll(value, nullptr, 10));
+    zend_long parsed = 0;
+    if (!kislay_parse_long_strict(value, &parsed)) {
+        php_error_docref(nullptr, E_WARNING,
+                         "Invalid numeric value for %s=\"%s\"; using default %lld",
+                         name,
+                         value,
+                         static_cast<long long>(fallback));
+        return fallback;
+    }
+    return parsed;
 }
 
 static bool kislay_env_bool(const char *name, bool fallback) {
@@ -46,13 +86,16 @@ static bool kislay_env_bool(const char *name, bool fallback) {
     if (value == nullptr || *value == '\0') {
         return fallback;
     }
-    if (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0) {
-        return true;
+    bool parsed = fallback;
+    if (!kislay_parse_bool_text(value, &parsed)) {
+        php_error_docref(nullptr, E_WARNING,
+                         "Invalid boolean value for %s=\"%s\"; using default %s",
+                         name,
+                         value,
+                         fallback ? "true" : "false");
+        return fallback;
     }
-    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 || std::strcmp(value, "FALSE") == 0) {
-        return false;
-    }
-    return fallback;
+    return parsed;
 }
 
 static std::string kislay_env_string(const char *name, const std::string &fallback) {
@@ -76,6 +119,7 @@ ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     zend_bool cors_enabled;
     zend_bool log_enabled;
     zend_bool async_enabled;
+    char *document_root;
     char *tls_cert;
     char *tls_key;
 ZEND_END_MODULE_GLOBALS(kislayphp_extension)
@@ -95,6 +139,7 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("kislayphp.http.cors", "0", PHP_INI_ALL, OnUpdateBool, cors_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.log", "0", PHP_INI_ALL, OnUpdateBool, log_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.async", "0", PHP_INI_ALL, OnUpdateBool, async_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.document_root", "", PHP_INI_ALL, OnUpdateString, document_root, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_cert", "", PHP_INI_ALL, OnUpdateString, tls_cert, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_key", "", PHP_INI_ALL, OnUpdateString, tls_key, zend_kislayphp_extension_globals, kislayphp_extension_globals)
 PHP_INI_END()
@@ -173,6 +218,7 @@ typedef struct _php_kislay_app_t {
     bool cors_enabled;
     bool log_enabled;
     bool async_enabled;
+    std::string document_root;
     std::string default_tls_cert;
     std::string default_tls_key;
     zend_object std;
@@ -221,6 +267,129 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
     return true;
 }
 
+static bool kislay_path_is_directory(const std::string &path) {
+    if (path.empty()) {
+        return false;
+    }
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    return S_ISDIR(st.st_mode);
+}
+
+static bool kislay_path_is_regular_file(const std::string &path) {
+    if (path.empty()) {
+        return false;
+    }
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    return S_ISREG(st.st_mode);
+}
+
+static int kislay_sanitize_thread_count(zend_long candidate, zend_long fallback, const char *source) {
+    zend_long value = candidate;
+    if (value <= 0) {
+        php_error_docref(nullptr, E_WARNING,
+                         "%s: invalid num_threads=%lld; using default %lld",
+                         source,
+                         static_cast<long long>(value),
+                         static_cast<long long>(fallback));
+        value = fallback > 0 ? fallback : 1;
+    }
+#if !defined(ZTS)
+    if (value > 1) {
+        php_error_docref(nullptr, E_WARNING, "%s: Thread Safety is disabled; forcing num_threads=1", source);
+        value = 1;
+    }
+#endif
+    return static_cast<int>(value);
+}
+
+static zend_long kislay_sanitize_timeout_ms(zend_long candidate, zend_long fallback, const char *source) {
+    if (candidate >= 0) {
+        return candidate;
+    }
+    zend_long resolved = fallback >= 0 ? fallback : 10000;
+    php_error_docref(nullptr, E_WARNING,
+                     "%s: invalid request_timeout_ms=%lld; using default %lld",
+                     source,
+                     static_cast<long long>(candidate),
+                     static_cast<long long>(resolved));
+    return resolved;
+}
+
+static size_t kislay_sanitize_max_body(zend_long candidate, zend_long fallback, const char *source) {
+    if (candidate >= 0) {
+        return static_cast<size_t>(candidate);
+    }
+    zend_long resolved = fallback >= 0 ? fallback : 0;
+    php_error_docref(nullptr, E_WARNING,
+                     "%s: invalid max_body=%lld; using default %lld",
+                     source,
+                     static_cast<long long>(candidate),
+                     static_cast<long long>(resolved));
+    return static_cast<size_t>(resolved);
+}
+
+static std::string kislay_sanitize_document_root(const std::string &candidate, const std::string &fallback, const char *source) {
+    if (candidate.empty()) {
+        return "";
+    }
+    if (kislay_path_is_directory(candidate)) {
+        return candidate;
+    }
+    if (!fallback.empty() && kislay_path_is_directory(fallback)) {
+        php_error_docref(nullptr, E_WARNING,
+                         "%s: document_root=\"%s\" is not a directory; using default \"%s\"",
+                         source,
+                         candidate.c_str(),
+                         fallback.c_str());
+        return fallback;
+    }
+    php_error_docref(nullptr, E_WARNING,
+                     "%s: document_root=\"%s\" is not a directory; disabling document root",
+                     source,
+                     candidate.c_str());
+    return "";
+}
+
+static void kislay_sanitize_tls_paths(std::string *cert_path, std::string *key_path, const char *source) {
+    if (cert_path == nullptr || key_path == nullptr) {
+        return;
+    }
+    if (cert_path->empty() && key_path->empty()) {
+        return;
+    }
+    if (cert_path->empty() || key_path->empty()) {
+        php_error_docref(nullptr, E_WARNING,
+                         "%s: TLS requires both cert and key; disabling TLS",
+                         source);
+        cert_path->clear();
+        key_path->clear();
+        return;
+    }
+    if (!kislay_path_is_regular_file(*cert_path) || access(cert_path->c_str(), R_OK) != 0) {
+        php_error_docref(nullptr, E_WARNING,
+                         "%s: TLS cert \"%s\" is not readable; disabling TLS",
+                         source,
+                         cert_path->c_str());
+        cert_path->clear();
+        key_path->clear();
+        return;
+    }
+    if (!kislay_path_is_regular_file(*key_path) || access(key_path->c_str(), R_OK) != 0) {
+        php_error_docref(nullptr, E_WARNING,
+                         "%s: TLS key \"%s\" is not readable; disabling TLS",
+                         source,
+                         key_path->c_str());
+        cert_path->clear();
+        key_path->clear();
+    }
+}
+
 static bool kislay_app_start_server(php_kislay_app_t *app,
                                     const std::string &listen_addr,
                                     const std::string &cert_path,
@@ -237,6 +406,10 @@ static bool kislay_app_start_server(php_kislay_app_t *app,
     if (app->max_body_bytes > 0) {
         option_values.push_back("max_request_size");
         option_values.push_back(std::to_string(app->max_body_bytes));
+    }
+    if (!app->document_root.empty()) {
+        option_values.push_back("document_root");
+        option_values.push_back(app->document_root);
     }
     if (!cert_path.empty()) {
         option_values.push_back("ssl_certificate");
@@ -433,23 +606,35 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->running.store(false, std::memory_order_relaxed);
     app->memory_limit_bytes = 0;
     app->gc_after_request = true;
-    app->thread_count = static_cast<int>(kislay_env_long("KISLAYPHP_HTTP_THREADS", KISLAYPHP_EXTENSION_G(http_threads)));
-#if !defined(ZTS)
-    if (app->thread_count > 1) {
-        app->thread_count = 1;
-    }
-#endif
-    app->read_timeout_ms = kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms));
+    app->thread_count = kislay_sanitize_thread_count(
+        kislay_env_long("KISLAYPHP_HTTP_THREADS", KISLAYPHP_EXTENSION_G(http_threads)),
+        KISLAYPHP_EXTENSION_G(http_threads),
+        "Kislay\\Core\\App::__construct"
+    );
+    app->read_timeout_ms = kislay_sanitize_timeout_ms(
+        kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms)),
+        KISLAYPHP_EXTENSION_G(read_timeout_ms),
+        "Kislay\\Core\\App::__construct"
+    );
     zend_long max_body = kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body));
-    if (max_body < 0) {
-        max_body = 0;
-    }
-    app->max_body_bytes = static_cast<size_t>(max_body);
+    app->max_body_bytes = kislay_sanitize_max_body(
+        max_body,
+        KISLAYPHP_EXTENSION_G(max_body),
+        "Kislay\\Core\\App::__construct"
+    );
     app->cors_enabled = kislay_env_bool("KISLAYPHP_HTTP_CORS", KISLAYPHP_EXTENSION_G(cors_enabled) != 0);
     app->log_enabled = kislay_env_bool("KISLAYPHP_HTTP_LOG", KISLAYPHP_EXTENSION_G(log_enabled) != 0);
     app->async_enabled = kislay_env_bool("KISLAYPHP_HTTP_ASYNC", KISLAYPHP_EXTENSION_G(async_enabled) != 0);
+    new (&app->document_root) std::string(
+        kislay_sanitize_document_root(
+            kislay_env_string("KISLAYPHP_HTTP_DOCUMENT_ROOT", KISLAYPHP_EXTENSION_G(document_root) ? KISLAYPHP_EXTENSION_G(document_root) : ""),
+            "",
+            "Kislay\\Core\\App::__construct"
+        )
+    );
     new (&app->default_tls_cert) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_CERT", KISLAYPHP_EXTENSION_G(tls_cert) ? KISLAYPHP_EXTENSION_G(tls_cert) : ""));
     new (&app->default_tls_key) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_KEY", KISLAYPHP_EXTENSION_G(tls_key) ? KISLAYPHP_EXTENSION_G(tls_key) : ""));
+    kislay_sanitize_tls_paths(&app->default_tls_cert, &app->default_tls_key, "Kislay\\Core\\App::__construct");
     app->std.handlers = &kislay_app_handlers;
     return &app->std;
 }
@@ -481,6 +666,7 @@ static void kislay_app_free_obj(zend_object *object) {
     app->exact_routes.~unordered_map();
     app->exact_routes_by_method.~unordered_map();
     app->method_routes.~unordered_map();
+    app->document_root.~basic_string();
     app->default_tls_cert.~basic_string();
     app->default_tls_key.~basic_string();
     app->lock.~mutex();
@@ -529,6 +715,57 @@ static std::string kislay_to_lower(const std::string &value) {
         return static_cast<char>(std::tolower(c));
     });
     return out;
+}
+
+static bool kislay_parse_bool_string_value(const std::string &value, bool *out) {
+    if (out == nullptr) {
+        return false;
+    }
+    std::string normalized = kislay_to_lower(value);
+    if (normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on") {
+        *out = true;
+        return true;
+    }
+    if (normalized == "0" || normalized == "false" || normalized == "no" || normalized == "off") {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool kislay_zval_to_bool(zval *value, bool fallback, const char *source) {
+    if (value == nullptr) {
+        return fallback;
+    }
+    switch (Z_TYPE_P(value)) {
+        case IS_TRUE:
+            return true;
+        case IS_FALSE:
+            return false;
+        case IS_LONG:
+            return Z_LVAL_P(value) != 0;
+        case IS_DOUBLE:
+            return Z_DVAL_P(value) != 0.0;
+        case IS_STRING: {
+            bool parsed = fallback;
+            std::string str_value(Z_STRVAL_P(value), Z_STRLEN_P(value));
+            if (kislay_parse_bool_string_value(str_value, &parsed)) {
+                return parsed;
+            }
+            php_error_docref(nullptr, E_WARNING,
+                             "%s: invalid boolean value \"%s\"; using default %s",
+                             source,
+                             str_value.c_str(),
+                             fallback ? "true" : "false");
+            return fallback;
+        }
+        default:
+            php_error_docref(nullptr, E_WARNING,
+                             "%s: invalid boolean value type; using default %s",
+                             source,
+                             fallback ? "true" : "false");
+            return fallback;
+    }
 }
 
 static bool kislay_is_valid_http_status(zend_long status) {
@@ -723,6 +960,85 @@ static bool kislay_path_has_prefix(const std::string &path, const std::string &p
 
 static bool kislay_response_has_content(const php_kislay_response_t *res) {
     return res->send_file || !res->body.empty() || !res->headers.empty() || !res->content_type.empty() || res->status_code != 200;
+}
+
+static std::string kislay_now_timestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_snapshot;
+#if defined(_WIN32)
+    localtime_s(&tm_snapshot, &tt);
+#else
+    localtime_r(&tt, &tm_snapshot);
+#endif
+    char date_buf[32];
+    std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S", &tm_snapshot);
+    char out[48];
+    std::snprintf(out, sizeof(out), "%s.%03lld", date_buf, static_cast<long long>(ms.count()));
+    return std::string(out);
+}
+
+static std::string kislay_sanitize_log_field(const std::string &value) {
+    if (value.empty()) {
+        return "-";
+    }
+    std::string out;
+    out.reserve(std::min<size_t>(value.size(), 240));
+    for (char c : value) {
+        if (c == '\r' || c == '\n' || c == '\t') {
+            out.push_back(' ');
+        } else {
+            out.push_back(c);
+        }
+        if (out.size() >= 240) {
+            out += "...";
+            break;
+        }
+    }
+    return out;
+}
+
+static long long kislay_response_size_bytes(const php_kislay_response_t *res) {
+    if (res == nullptr) {
+        return 0;
+    }
+    if (res->send_file) {
+        auto it = res->headers.find("content-length");
+        if (it != res->headers.end() && !it->second.empty()) {
+            char *end = nullptr;
+            long long parsed = std::strtoll(it->second.c_str(), &end, 10);
+            if (end != it->second.c_str() && parsed >= 0) {
+                return parsed;
+            }
+        }
+        struct stat st;
+        if (!res->file_path.empty() && stat(res->file_path.c_str(), &st) == 0 && st.st_size >= 0) {
+            return static_cast<long long>(st.st_size);
+        }
+    }
+    return static_cast<long long>(res->body.size());
+}
+
+static void kislay_log_request_record(const php_kislay_app_t *app,
+                                      const std::string &method,
+                                      const std::string &uri,
+                                      zend_long status_code,
+                                      long long response_bytes,
+                                      long long duration_ms,
+                                      const std::string &error_message) {
+    if (app == nullptr || !app->log_enabled) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[kislay] time=\"%s\" request=\"%s %s\" response=\"%lld %lldB\" duration_ms=%lld error=\"%s\"\n",
+                 kislay_now_timestamp().c_str(),
+                 method.c_str(),
+                 uri.c_str(),
+                 static_cast<long long>(status_code),
+                 response_bytes,
+                 duration_ms,
+                 kislay_sanitize_log_field(error_message).c_str());
 }
 
 static void kislay_mark_internal_error(php_kislay_response_t *res) {
@@ -983,9 +1299,11 @@ static int kislay_begin_request(struct mg_connection *conn) {
         return 0;
     }
 
+    const auto request_start = std::chrono::steady_clock::now();
     auto *app = static_cast<php_kislay_app_t *>(info->user_data);
 
     std::string method = info->request_method ? info->request_method : "";
+    std::string log_method = kislay_to_upper(method);
     std::string uri = info->local_uri ? info->local_uri : (info->request_uri ? info->request_uri : "");
     size_t query_pos = uri.find('?');
     if (query_pos != std::string::npos) {
@@ -1015,6 +1333,10 @@ static int kislay_begin_request(struct mg_connection *conn) {
                         "Content-Length: 0\r\n"
                         "Connection: close\r\n"
                         "\r\n");
+        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_start
+        ).count();
+        kislay_log_request_record(app, log_method, uri, 200, 0, duration_ms, "");
         return 1;
     }
 
@@ -1025,6 +1347,18 @@ static int kislay_begin_request(struct mg_connection *conn) {
         res->status_code = 413;
         res->body = "Payload Too Large";
         kislay_send_response(conn, res, app->cors_enabled);
+        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_start
+        ).count();
+        kislay_log_request_record(
+            app,
+            log_method,
+            uri,
+            res->status_code,
+            kislay_response_size_bytes(res),
+            duration_ms,
+            res->body
+        );
         zval_ptr_dtor(&res_obj);
         return 1;
     }
@@ -1079,11 +1413,24 @@ static int kislay_begin_request(struct mg_connection *conn) {
     const std::vector<zval> *route_middleware = nullptr;
     const zval *route_handler = nullptr;
     bool route_matched = false;
+    std::string request_error;
 
     if (app->memory_limit_bytes > 0 && zend_memory_usage(0) > app->memory_limit_bytes) {
         res->status_code = 500;
         res->body = "Memory limit exceeded";
         kislay_send_response(conn, res, app->cors_enabled);
+        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_start
+        ).count();
+        kislay_log_request_record(
+            app,
+            req->method,
+            uri,
+            res->status_code,
+            kislay_response_size_bytes(res),
+            duration_ms,
+            res->body
+        );
         zval_ptr_dtor(&req_obj);
         zval_ptr_dtor(&res_obj);
         return 1;
@@ -1214,17 +1561,30 @@ static int kislay_begin_request(struct mg_connection *conn) {
         if (route_matched) {
             res->status_code = 500;
             res->body = "Internal Server Error";
+            request_error = res->body;
         } else {
             res->status_code = 404;
             res->body = "Not Found";
+            request_error = res->body;
         }
     }
 
     kislay_send_response(conn, res, app->cors_enabled);
-
-    if (app->log_enabled) {
-        std::fprintf(stderr, "[kislay] %s %s %lld\n", req->method.c_str(), uri.c_str(), static_cast<long long>(res->status_code));
+    if (request_error.empty() && res->status_code >= 400) {
+        request_error = res->body;
     }
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - request_start
+    ).count();
+    kislay_log_request_record(
+        app,
+        req->method,
+        uri,
+        res->status_code,
+        kislay_response_size_bytes(res),
+        duration_ms,
+        request_error
+    );
 
     zval_ptr_dtor(&req_obj);
     zval_ptr_dtor(&res_obj);
@@ -2281,70 +2641,88 @@ PHP_METHOD(KislayApp, setOption) {
 
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
     if (kislay_app_is_running(app)) {
-        zend_throw_exception(zend_ce_exception, "Cannot set options while server is running", 0);
+        php_error_docref(nullptr, E_WARNING, "Cannot set options while server is running; ignoring update");
         RETURN_FALSE;
     }
 
     std::string key = kislay_to_lower(std::string(name, name_len));
     if (key == "num_threads" || key == "threads") {
-        zend_long v = zval_get_long(value);
-        if (v <= 0) {
-            zend_throw_exception(zend_ce_exception, "num_threads must be > 0", 0);
-            RETURN_FALSE;
-        }
-#if !defined(ZTS)
-        if (v > 1) {
-            php_error_docref(nullptr, E_WARNING, "Thread Safety is disabled; forcing num_threads=1");
-            v = 1;
-        }
-#endif
-        app->thread_count = static_cast<int>(v);
+        zend_long requested = zval_get_long(value);
+        app->thread_count = kislay_sanitize_thread_count(
+            requested,
+            KISLAYPHP_EXTENSION_G(http_threads),
+            "Kislay\\Core\\App::setOption(num_threads)"
+        );
         RETURN_TRUE;
     }
     if (key == "request_timeout_ms" || key == "read_timeout_ms") {
-        zend_long v = zval_get_long(value);
-        if (v < 0) {
-            zend_throw_exception(zend_ce_exception, "request_timeout_ms must be >= 0", 0);
-            RETURN_FALSE;
-        }
-        app->read_timeout_ms = v;
+        app->read_timeout_ms = kislay_sanitize_timeout_ms(
+            zval_get_long(value),
+            KISLAYPHP_EXTENSION_G(read_timeout_ms),
+            "Kislay\\Core\\App::setOption(request_timeout_ms)"
+        );
         RETURN_TRUE;
     }
     if (key == "max_request_size" || key == "max_body" || key == "max_body_bytes") {
-        zend_long v = zval_get_long(value);
-        if (v < 0) {
-            zend_throw_exception(zend_ce_exception, "max body size must be >= 0", 0);
-            RETURN_FALSE;
-        }
-        app->max_body_bytes = static_cast<size_t>(v);
+        app->max_body_bytes = kislay_sanitize_max_body(
+            zval_get_long(value),
+            KISLAYPHP_EXTENSION_G(max_body),
+            "Kislay\\Core\\App::setOption(max_body)"
+        );
         RETURN_TRUE;
     }
     if (key == "cors" || key == "cors_enabled") {
-        app->cors_enabled = zval_is_true(value);
+        app->cors_enabled = kislay_zval_to_bool(value, app->cors_enabled, "Kislay\\Core\\App::setOption(cors)");
         RETURN_TRUE;
     }
     if (key == "log" || key == "log_enabled") {
-        app->log_enabled = zval_is_true(value);
+        app->log_enabled = kislay_zval_to_bool(value, app->log_enabled, "Kislay\\Core\\App::setOption(log)");
+        RETURN_TRUE;
+    }
+    if (key == "async" || key == "async_enabled") {
+        app->async_enabled = kislay_zval_to_bool(value, app->async_enabled, "Kislay\\Core\\App::setOption(async)");
         RETURN_TRUE;
     }
     if (key == "tls_cert") {
         zend_string *s = zval_get_string(value);
-        app->default_tls_cert.assign(ZSTR_VAL(s), ZSTR_LEN(s));
+        std::string candidate(ZSTR_VAL(s), ZSTR_LEN(s));
         zend_string_release(s);
+        if (!candidate.empty() && (!kislay_path_is_regular_file(candidate) || access(candidate.c_str(), R_OK) != 0)) {
+            php_error_docref(nullptr, E_WARNING,
+                             "Kislay\\Core\\App::setOption(tls_cert): \"%s\" is not readable; keeping previous value",
+                             candidate.c_str());
+            RETURN_TRUE;
+        }
+        app->default_tls_cert = candidate;
         RETURN_TRUE;
     }
     if (key == "tls_key") {
         zend_string *s = zval_get_string(value);
-        app->default_tls_key.assign(ZSTR_VAL(s), ZSTR_LEN(s));
+        std::string candidate(ZSTR_VAL(s), ZSTR_LEN(s));
         zend_string_release(s);
+        if (!candidate.empty() && (!kislay_path_is_regular_file(candidate) || access(candidate.c_str(), R_OK) != 0)) {
+            php_error_docref(nullptr, E_WARNING,
+                             "Kislay\\Core\\App::setOption(tls_key): \"%s\" is not readable; keeping previous value",
+                             candidate.c_str());
+            RETURN_TRUE;
+        }
+        app->default_tls_key = candidate;
         RETURN_TRUE;
     }
     if (key == "document_root") {
+        zend_string *s = zval_get_string(value);
+        std::string candidate(ZSTR_VAL(s), ZSTR_LEN(s));
+        zend_string_release(s);
+        app->document_root = kislay_sanitize_document_root(
+            candidate,
+            app->document_root,
+            "Kislay\\Core\\App::setOption(document_root)"
+        );
         RETURN_TRUE;
     }
 
-    zend_throw_exception_ex(zend_ce_exception, 0, "Unsupported option: %s", name);
-    RETURN_FALSE;
+    php_error_docref(nullptr, E_WARNING, "Unsupported option \"%s\"; ignoring and keeping defaults", name);
+    RETURN_TRUE;
 }
 
 static bool kislay_app_add_route(php_kislay_app_t *app, const std::string &method, const std::string &pattern, zval *handler) {
@@ -2718,6 +3096,10 @@ PHP_METHOD(KislayApp, listen) {
     if (key_path.empty()) {
         key_path = app->default_tls_key;
     }
+    app->document_root = kislay_sanitize_document_root(app->document_root, "", "Kislay\\Core\\App::listen");
+    kislay_sanitize_tls_paths(&cert_path, &key_path, "Kislay\\Core\\App::listen");
+    app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listen");
+    app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listen");
 
     if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
         zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
@@ -2777,6 +3159,10 @@ PHP_METHOD(KislayApp, listenAsync) {
     if (key_path.empty()) {
         key_path = app->default_tls_key;
     }
+    app->document_root = kislay_sanitize_document_root(app->document_root, "", "Kislay\\Core\\App::listenAsync");
+    kislay_sanitize_tls_paths(&cert_path, &key_path, "Kislay\\Core\\App::listenAsync");
+    app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listenAsync");
+    app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listenAsync");
 
     if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
         zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
@@ -2828,8 +3214,10 @@ PHP_METHOD(KislayApp, setMemoryLimit) {
     ZEND_PARSE_PARAMETERS_END();
 
     if (bytes < 0) {
-        zend_throw_exception(zend_ce_exception, "Memory limit must be >= 0", 0);
-        RETURN_FALSE;
+        php_error_docref(nullptr, E_WARNING,
+                         "Kislay\\Core\\App::setMemoryLimit: invalid value %lld; using 0 (disabled)",
+                         static_cast<long long>(bytes));
+        bytes = 0;
     }
 
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
@@ -3231,6 +3619,8 @@ static PHP_GINIT_FUNCTION(kislayphp_extension) {
     kislayphp_extension_globals->max_body = 0;
     kislayphp_extension_globals->cors_enabled = 0;
     kislayphp_extension_globals->log_enabled = 0;
+    kislayphp_extension_globals->async_enabled = 0;
+    kislayphp_extension_globals->document_root = nullptr;
     kislayphp_extension_globals->tls_cert = nullptr;
     kislayphp_extension_globals->tls_key = nullptr;
 }

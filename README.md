@@ -92,6 +92,10 @@ $app->listen('0.0.0.0', 8080);
 
 `num_threads` note:
 - On non-thread-safe PHP builds (`Thread Safety => disabled`), values above `1` are automatically clamped to `1` to prevent middleware/route instability.
+- Invalid option values now fall back to safe defaults with runtime warnings instead of hard failures.
+
+Request log format (enable via `$app->setOption('log', true)`):
+- `[kislay] time="YYYY-MM-DD HH:MM:SS.mmm" request="METHOD /path" response="STATUS BYTES" duration_ms=NN error="..."`
 
 Kislay routing helpers:
 
@@ -148,22 +152,26 @@ Kislay Core implements a hybrid threading model combining PHP execution with asy
 ### php.ini Settings
 
 ```ini
-kislayphp.num_threads = 4
-kislayphp.document_root = "/var/www"
-kislayphp.enable_ssl = 0
-kislayphp.ssl_cert = "/path/to/cert.pem"
-kislayphp.ssl_key = "/path/to/key.pem"
-kislayphp.max_request_size = 1048576
-kislayphp.request_timeout = 30
+kislayphp.http.threads = 4
+kislayphp.http.document_root = "/var/www"
+kislayphp.http.read_timeout_ms = 10000
+kislayphp.http.max_body = 1048576
+kislayphp.http.cors = 0
+kislayphp.http.log = 1
+kislayphp.http.tls_cert = "/path/to/cert.pem"
+kislayphp.http.tls_key = "/path/to/key.pem"
 ```
 
 ### Environment Variables
 
 ```bash
-export KISLAYPHP_NUM_THREADS=4
-export KISLAYPHP_DOCUMENT_ROOT=/var/www
-export KISLAYPHP_SSL_CERT=/path/to/cert.pem
-export KISLAYPHP_SSL_KEY=/path/to/key.pem
+export KISLAYPHP_HTTP_THREADS=4
+export KISLAYPHP_HTTP_DOCUMENT_ROOT=/var/www
+export KISLAYPHP_HTTP_READ_TIMEOUT_MS=10000
+export KISLAYPHP_HTTP_MAX_BODY=1048576
+export KISLAYPHP_HTTP_LOG=1
+export KISLAYPHP_HTTP_TLS_CERT=/path/to/cert.pem
+export KISLAYPHP_HTTP_TLS_KEY=/path/to/key.pem
 ```
 
 ## 🧪 Testing

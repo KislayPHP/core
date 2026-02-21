@@ -16,15 +16,15 @@
   </lead>
   <date>2026-02-21</date>
   <version>
-    <release>0.1.4</release>
-    <api>0.1.4</api>
+    <release>0.1.5</release>
+    <api>0.1.5</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Stabilized middleware execution on non-ZTS PHP by forcing num_threads=1 when thread safety is disabled.</notes>
+  <notes>Added safe config fallbacks with warnings, structured request logging, and document_root/TLS dependency validation.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />
