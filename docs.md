@@ -436,6 +436,7 @@ $app->listen('0.0.0.0', 8443, [
 | `kislayphp.http.cors` | 0 | Enable CORS headers |
 | `kislayphp.http.log` | 0 | Enable request logging |
 | `kislayphp.http.async` | 0 | Enable async processing |
+| `kislayphp.http.referrer_policy` | `strict-origin-when-cross-origin` | Default `Referrer-Policy` response header |
 | `kislayphp.http.tls_cert` | "" | Default SSL certificate path |
 | `kislayphp.http.tls_key` | "" | Default SSL private key path |
 
@@ -446,6 +447,7 @@ $app->listen('0.0.0.0', 8443, [
 | `KISLAYPHP_HTTP_THREADS` | Override thread count |
 | `KISLAYPHP_HTTP_READ_TIMEOUT_MS` | Override read timeout |
 | `KISLAYPHP_HTTP_MAX_BODY` | Override max body size |
+| `KISLAYPHP_HTTP_REFERRER_POLICY` | Override default `Referrer-Policy` header |
 
 ## Performance Tuning
 
@@ -559,6 +561,8 @@ $app->listen('0.0.0.0', 8080);
 ```php
 <?php
 $app = new Kislay\\Core\\App();
+$app->setOption('cors', true); // built-in preflight + allow headers
+$app->setOption('referrer_policy', 'origin-when-cross-origin'); // optional override
 
 // CORS middleware
 $app->use(function($req, $res, $next) {
@@ -580,6 +584,9 @@ $app->get('/api/data', function($req, $res) {
 
 $app->listen('0.0.0.0', 8080);
 ```
+
+If `cors` is disabled and the server receives a browser preflight (`OPTIONS` + `Origin` + `Access-Control-Request-Method`) without a matching custom route, Kislay returns `403` with:
+`CORS disabled. Enable with $app->setOption('cors', true).`
 
 ### Rate Limiting
 ```php

@@ -14,17 +14,17 @@
     <email>kislayraj.89@gmail.com</email>
     <active>yes</active>
   </lead>
-  <date>2026-02-21</date>
+  <date>2026-02-22</date>
   <version>
-    <release>0.0.1</release>
-    <api>0.0.1</api>
+    <release>0.0.2</release>
+    <api>0.0.2</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Added NTS compatibility mode (stack-guard disable), improved callback diagnostics, and stabilized middleware/route execution on Linux NTS builds.</notes>
+  <notes>Added Referrer-Policy defaults/override support, explicit CORS-disabled preflight hints, and fixed unmatched-route behavior with path middleware headers.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />

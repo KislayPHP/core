@@ -53,6 +53,7 @@ if ($app->setOption('num_threads', 0) !== true) fail('setOption(num_threads) fai
 if ($app->setOption('request_timeout_ms', -100) !== true) fail('setOption(request_timeout_ms) failed');
 if ($app->setOption('max_body', -1) !== true) fail('setOption(max_body) failed');
 if ($app->setOption('cors', 'not-bool') !== true) fail('setOption(cors) failed');
+if ($app->setOption('referrer_policy', 'bad-policy') !== true) fail('setOption(referrer_policy) failed');
 if ($app->setOption('document_root', '/this/path/does/not/exist') !== true) fail('setOption(document_root) failed');
 if ($app->setOption('tls_cert', '/tmp/not-existing-cert.pem') !== true) fail('setOption(tls_cert) failed');
 if ($app->setOption('tls_key', '/tmp/not-existing-key.pem') !== true) fail('setOption(tls_key) failed');
@@ -64,6 +65,7 @@ if (strpos($joined, 'invalid num_threads') === false) fail('missing num_threads 
 if (strpos($joined, 'invalid request_timeout_ms') === false) fail('missing timeout warning');
 if (strpos($joined, 'invalid max_body') === false) fail('missing max_body warning');
 if (strpos($joined, 'invalid boolean value') === false) fail('missing bool warning');
+if (strpos($joined, 'invalid referrer_policy') === false) fail('missing referrer policy warning');
 if (strpos($joined, 'document_root=') === false) fail('missing document_root warning');
 if (strpos($joined, 'setOption(tls_cert)') === false) fail('missing tls_cert warning');
 if (strpos($joined, 'setOption(tls_key)') === false) fail('missing tls_key warning');

@@ -95,6 +95,11 @@ $app->listen('0.0.0.0', 8080);
 - Invalid option values now fall back to safe defaults with runtime warnings instead of hard failures.
 - On non-thread-safe PHP builds, `listen()`/`listenAsync()` enable NTS compatibility mode (disables Zend stack guard) to prevent request-time internal recursion errors.
 
+Cross-origin note:
+- Browser `strict-origin-when-cross-origin` behavior is now handled with an explicit `Referrer-Policy` response header (default: `strict-origin-when-cross-origin`).
+- Override with `$app->setOption('referrer_policy', 'origin-when-cross-origin')` or disable with `$app->setOption('referrer_policy', 'off')`.
+- If CORS is disabled, browser preflight requests receive `403` with a hint: `CORS disabled. Enable with $app->setOption('cors', true).`
+
 Request log format (enable via `$app->setOption('log', true)`):
 - `[kislay] time="YYYY-MM-DD HH:MM:SS.mmm" request="METHOD /path" response="STATUS BYTES" duration_ms=NN error="..."`
 
@@ -117,6 +122,37 @@ if ($app->isRunning()) {
     $app->wait(); // block until stopped (or use $app->wait(5000) timeout)
 }
 ```
+
+## 🧩 Service Communication Quickstart
+
+This repo includes a one-command starter for service communication using discovery + gateway.
+
+```bash
+cd examples/microservice-stack
+cp .env.example .env
+./start.sh
+./status.sh
+```
+
+Stop it with:
+
+```bash
+./stop.sh
+```
+
+## ☁️ AWS Validation
+
+Run full extension build/load/API/communication validation on your EC2 host:
+
+```bash
+./scripts/aws_validate_extensions.sh \
+  /Users/dhruvraj/Downloads/firstkis.pem \
+  ec2-54-242-252-137.compute-1.amazonaws.com \
+  ubuntu
+```
+
+Latest report: `docs/AWS_VALIDATION_2026-02-21.md`
+Checklist: `docs/PRODUCTION_READINESS_CHECKLIST.md`
 
 ## 🏗️ Architecture
 
@@ -159,6 +195,7 @@ kislayphp.http.read_timeout_ms = 10000
 kislayphp.http.max_body = 1048576
 kislayphp.http.cors = 0
 kislayphp.http.log = 1
+kislayphp.http.referrer_policy = "strict-origin-when-cross-origin"
 kislayphp.http.tls_cert = "/path/to/cert.pem"
 kislayphp.http.tls_key = "/path/to/key.pem"
 ```
@@ -171,6 +208,7 @@ export KISLAYPHP_HTTP_DOCUMENT_ROOT=/var/www
 export KISLAYPHP_HTTP_READ_TIMEOUT_MS=10000
 export KISLAYPHP_HTTP_MAX_BODY=1048576
 export KISLAYPHP_HTTP_LOG=1
+export KISLAYPHP_HTTP_REFERRER_POLICY=strict-origin-when-cross-origin
 export KISLAYPHP_HTTP_TLS_CERT=/path/to/cert.pem
 export KISLAYPHP_HTTP_TLS_KEY=/path/to/key.pem
 ```

@@ -106,6 +106,46 @@ static std::string kislay_env_string(const char *name, const std::string &fallba
     return std::string(value);
 }
 
+static std::string kislay_ascii_lower_copy(const std::string &value) {
+    std::string out = value;
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+static bool kislay_is_supported_referrer_policy(const std::string &normalized_policy) {
+    return normalized_policy == "no-referrer" ||
+           normalized_policy == "no-referrer-when-downgrade" ||
+           normalized_policy == "origin" ||
+           normalized_policy == "origin-when-cross-origin" ||
+           normalized_policy == "same-origin" ||
+           normalized_policy == "strict-origin" ||
+           normalized_policy == "strict-origin-when-cross-origin" ||
+           normalized_policy == "unsafe-url";
+}
+
+static std::string kislay_sanitize_referrer_policy(const std::string &candidate,
+                                                   const std::string &fallback,
+                                                   const char *source) {
+    std::string normalized = kislay_ascii_lower_copy(candidate);
+    if (normalized.empty()) {
+        return fallback;
+    }
+    if (normalized == "off" || normalized == "none" || normalized == "false" || normalized == "0") {
+        return "";
+    }
+    if (kislay_is_supported_referrer_policy(normalized)) {
+        return normalized;
+    }
+    php_error_docref(nullptr, E_WARNING,
+                     "%s: invalid referrer_policy=\"%s\"; using default \"%s\"",
+                     source,
+                     candidate.c_str(),
+                     fallback.c_str());
+    return fallback;
+}
+
 static zend_class_entry *kislay_app_ce;
 static zend_class_entry *kislay_request_ce;
 static zend_class_entry *kislay_response_ce;
@@ -122,6 +162,7 @@ ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     char *document_root;
     char *tls_cert;
     char *tls_key;
+    char *referrer_policy;
 ZEND_END_MODULE_GLOBALS(kislayphp_extension)
 
 ZEND_DECLARE_MODULE_GLOBALS(kislayphp_extension)
@@ -142,6 +183,7 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("kislayphp.http.document_root", "", PHP_INI_ALL, OnUpdateString, document_root, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_cert", "", PHP_INI_ALL, OnUpdateString, tls_cert, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_key", "", PHP_INI_ALL, OnUpdateString, tls_key, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.referrer_policy", "strict-origin-when-cross-origin", PHP_INI_ALL, OnUpdateString, referrer_policy, zend_kislayphp_extension_globals, kislayphp_extension_globals)
 PHP_INI_END()
 
 namespace kislay {
@@ -221,6 +263,7 @@ typedef struct _php_kislay_app_t {
     std::string document_root;
     std::string default_tls_cert;
     std::string default_tls_key;
+    std::string referrer_policy;
     zend_object std;
 } php_kislay_app_t;
 
@@ -645,6 +688,16 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     new (&app->default_tls_cert) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_CERT", KISLAYPHP_EXTENSION_G(tls_cert) ? KISLAYPHP_EXTENSION_G(tls_cert) : ""));
     new (&app->default_tls_key) std::string(kislay_env_string("KISLAYPHP_HTTP_TLS_KEY", KISLAYPHP_EXTENSION_G(tls_key) ? KISLAYPHP_EXTENSION_G(tls_key) : ""));
     kislay_sanitize_tls_paths(&app->default_tls_cert, &app->default_tls_key, "Kislay\\Core\\App::__construct");
+    const std::string ini_referrer_policy = KISLAYPHP_EXTENSION_G(referrer_policy) != nullptr
+        ? KISLAYPHP_EXTENSION_G(referrer_policy)
+        : "strict-origin-when-cross-origin";
+    new (&app->referrer_policy) std::string(
+        kislay_sanitize_referrer_policy(
+            kislay_env_string("KISLAYPHP_HTTP_REFERRER_POLICY", ini_referrer_policy),
+            "strict-origin-when-cross-origin",
+            "Kislay\\Core\\App::__construct"
+        )
+    );
     app->std.handlers = &kislay_app_handlers;
     return &app->std;
 }
@@ -679,6 +732,7 @@ static void kislay_app_free_obj(zend_object *object) {
     app->document_root.~basic_string();
     app->default_tls_cert.~basic_string();
     app->default_tls_key.~basic_string();
+    app->referrer_policy.~basic_string();
     app->lock.~mutex();
     zend_object_std_dtor(&app->std);
 }
@@ -972,6 +1026,11 @@ static bool kislay_response_has_content(const php_kislay_response_t *res) {
     return res->send_file || !res->body.empty() || !res->headers.empty() || !res->content_type.empty() || res->status_code != 200;
 }
 
+static bool kislay_response_has_terminal_content(const php_kislay_response_t *res) {
+    // Headers alone are not treated as a terminal response for unmatched routes.
+    return res->send_file || !res->body.empty() || !res->content_type.empty() || res->status_code != 200;
+}
+
 static std::string kislay_now_timestamp() {
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -1158,7 +1217,33 @@ static void kislay_response_set_body(php_kislay_response_t *res, const char *dat
     res->body.assign(data, len);
 }
 
-static void kislay_send_response(struct mg_connection *conn, php_kislay_response_t *res, bool cors_enabled) {
+static void kislay_write_cors_headers(struct mg_connection *conn, bool cors_enabled) {
+    if (!cors_enabled) {
+        return;
+    }
+    mg_printf(conn,
+              "Access-Control-Allow-Origin: *\r\n"
+              "Access-Control-Allow-Private-Network: true\r\n"
+              "Access-Control-Allow-Headers: *\r\n"
+              "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
+}
+
+static void kislay_write_referrer_policy_header(struct mg_connection *conn,
+                                                const php_kislay_response_t *res,
+                                                const std::string &referrer_policy) {
+    if (referrer_policy.empty()) {
+        return;
+    }
+    if (res->headers.find("referrer-policy") != res->headers.end()) {
+        return;
+    }
+    mg_printf(conn, "Referrer-Policy: %s\r\n", referrer_policy.c_str());
+}
+
+static void kislay_send_response(struct mg_connection *conn,
+                                 php_kislay_response_t *res,
+                                 bool cors_enabled,
+                                 const std::string &referrer_policy) {
     zend_long status_code = res->status_code;
     if (!kislay_is_valid_http_status(status_code)) {
         status_code = 500;
@@ -1192,13 +1277,8 @@ static void kislay_send_response(struct mg_connection *conn, php_kislay_response
               content_type.c_str(),
               content_length.c_str());
 
-    if (cors_enabled) {
-        mg_printf(conn,
-                  "Access-Control-Allow-Origin: *\r\n"
-                  "Access-Control-Allow-Private-Network: true\r\n"
-                  "Access-Control-Allow-Headers: *\r\n"
-                  "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
-    }
+    kislay_write_cors_headers(conn, cors_enabled);
+    kislay_write_referrer_policy_header(conn, res, referrer_policy);
 
     for (const auto &header : res->headers) {
         if (header.first == "content-type" || header.first == "content-length") {
@@ -1413,13 +1493,13 @@ static int kislay_begin_request(struct mg_connection *conn) {
     if (app->cors_enabled && method == "OPTIONS") {
         mg_printf(conn, "HTTP/1.1 200 OK\r\n"
                         "Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
-                        "Access-Control-Allow-Origin: *\r\n"
-                        "Access-Control-Allow-Private-Network: true\r\n"
-                        "Access-Control-Allow-Headers: *\r\n"
-                        "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
                         "Content-Length: 0\r\n"
-                        "Connection: close\r\n"
-                        "\r\n");
+                        "Connection: close\r\n");
+        kislay_write_cors_headers(conn, true);
+        if (!app->referrer_policy.empty()) {
+            mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
+        }
+        mg_printf(conn, "\r\n");
         const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - request_start
         ).count();
@@ -1433,7 +1513,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
         php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ(res_obj));
         res->status_code = 413;
         res->body = "Payload Too Large";
-        kislay_send_response(conn, res, app->cors_enabled);
+        kislay_send_response(conn, res, app->cors_enabled, app->referrer_policy);
         const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - request_start
         ).count();
@@ -1505,7 +1585,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
     if (app->memory_limit_bytes > 0 && zend_memory_usage(0) > app->memory_limit_bytes) {
         res->status_code = 500;
         res->body = "Memory limit exceeded";
-        kislay_send_response(conn, res, app->cors_enabled);
+        kislay_send_response(conn, res, app->cors_enabled, app->referrer_policy);
         const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - request_start
         ).count();
@@ -1650,19 +1730,28 @@ static int kislay_begin_request(struct mg_connection *conn) {
         }
     }
 
-    if (!handled && !kislay_response_has_content(res)) {
+    if (!handled && !kislay_response_has_terminal_content(res)) {
         if (route_matched) {
             res->status_code = 500;
             res->body = "Internal Server Error";
             request_error = res->body;
         } else {
-            res->status_code = 404;
-            res->body = "Not Found";
+            const bool looks_like_browser_preflight =
+                req->method == "OPTIONS" &&
+                req->headers.find("origin") != req->headers.end() &&
+                req->headers.find("access-control-request-method") != req->headers.end();
+            if (!app->cors_enabled && looks_like_browser_preflight) {
+                res->status_code = 403;
+                res->body = "CORS disabled. Enable with $app->setOption('cors', true).";
+            } else {
+                res->status_code = 404;
+                res->body = "Not Found";
+            }
             request_error = res->body;
         }
     }
 
-    kislay_send_response(conn, res, app->cors_enabled);
+    kislay_send_response(conn, res, app->cors_enabled, app->referrer_policy);
     if (request_error.empty() && res->status_code >= 400) {
         request_error = res->body;
     }
@@ -2768,6 +2857,20 @@ PHP_METHOD(KislayApp, setOption) {
         app->cors_enabled = kislay_zval_to_bool(value, app->cors_enabled, "Kislay\\Core\\App::setOption(cors)");
         RETURN_TRUE;
     }
+    if (key == "referrer_policy" || key == "referrer-policy") {
+        zend_string *s = zval_get_string(value);
+        std::string candidate(ZSTR_VAL(s), ZSTR_LEN(s));
+        zend_string_release(s);
+        const std::string fallback_policy = app->referrer_policy.empty()
+            ? "strict-origin-when-cross-origin"
+            : app->referrer_policy;
+        app->referrer_policy = kislay_sanitize_referrer_policy(
+            candidate,
+            fallback_policy,
+            "Kislay\\Core\\App::setOption(referrer_policy)"
+        );
+        RETURN_TRUE;
+    }
     if (key == "log" || key == "log_enabled") {
         app->log_enabled = kislay_zval_to_bool(value, app->log_enabled, "Kislay\\Core\\App::setOption(log)");
         RETURN_TRUE;
@@ -3718,6 +3821,7 @@ static PHP_GINIT_FUNCTION(kislayphp_extension) {
     kislayphp_extension_globals->document_root = nullptr;
     kislayphp_extension_globals->tls_cert = nullptr;
     kislayphp_extension_globals->tls_key = nullptr;
+    kislayphp_extension_globals->referrer_policy = nullptr;
 }
 
 zend_module_entry kislayphp_extension_module_entry = {
