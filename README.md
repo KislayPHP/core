@@ -362,8 +362,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## 🆘 Support
 
 - 📖 [Documentation](docs.md)
-- 📘 [Class Reference](CLASS_REFERENCE.md)
-- 🚀 [Deployment Guide (Docker/AWS/Cloud/On-Prem)](docs/DEPLOYMENT_GUIDE_MULTI_ENV.md)
+- 🌐 Full detailed docs: [Skelves Documentation Site](https://skelves.com/docs)
+- 🧪 Local docs view: `http://localhost:5180/docs`
 - 🐛 [Issues](https://github.com/KislayPHP/core/issues)
 - 💬 [Discussions](https://github.com/KislayPHP/core/discussions)
 
