@@ -362,6 +362,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## 🆘 Support
 
 - 📖 [Documentation](docs.md)
+- 📘 [Class Reference](CLASS_REFERENCE.md)
+- 🚀 [Deployment Guide (Docker/AWS/Cloud/On-Prem)](docs/DEPLOYMENT_GUIDE_MULTI_ENV.md)
 - 🐛 [Issues](https://github.com/KislayPHP/core/issues)
 - 💬 [Discussions](https://github.com/KislayPHP/core/discussions)
 
