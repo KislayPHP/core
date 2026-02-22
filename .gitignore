@@ -33,3 +33,8 @@
 # Benchmark artifacts (generated)
 bench/results/*
 !bench/results/.gitkeep
+
+# Generated test artifacts
+php_test_results_*.txt
+*.orig
+*.rej
