@@ -13,10 +13,11 @@ The Kislay Core extension provides high-performance HTTP/HTTPS server capabiliti
 - **Memory isolation**: Each request has its own memory space
 
 ### Performance Characteristics
-- **6.6M requests/second** sustained throughput
-- **0.25ms P95 latency** under load
-- **6MB stable memory usage** (no leaks)
-- **11.4% CPU usage** at peak load
+- **63K requests/second** (Plaintext) / **48K requests/second** (JSON)
+- **0.25ms P95 latency** / **0.45ms P99 latency**
+- **Linear CPU utilization** for background tasks on ZTS PHP
+- **6.0MB stable memory usage** (no leaks)
+- **11.4% CPU usage** (Idle/Baseline)
 
 ## Installation
 
