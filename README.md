@@ -11,6 +11,7 @@ A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with 
 ## ⚡ Key Features
 
 - 🚀 **High Performance**: 63K requests/second at 200 concurrency with 0.25ms P95 latency
+- 🔄 **Event-Driven**: Native Promise-based asynchronous architecture with a background event loop
 - 🔒 **Secure**: Built-in HTTPS/SSL support with TLS encryption
 - 🛠️ **Full PHP Compatibility**: Complete PHP processing without fast-path bypass
 - 🏗️ **Microservices Ready**: Lightweight server for containerized deployments
@@ -121,6 +122,30 @@ $app->listenAsync('0.0.0.0', 8080);
 if ($app->isRunning()) {
     $app->wait(); // block until stopped (or use $app->wait(5000) timeout)
 }
+```
+
+⚡ **Event-Driven Asynchrony**
+
+Kislay Core now features a native background event loop and Promise model for non-blocking task execution:
+
+```php
+$app->setOption('async', true);
+
+// Offload a heavy task to the background thread
+async(function() {
+    return heavy_computation();
+})->then(function($result) {
+    echo "Done: $result\n";
+})->catch(function($err) {
+    echo "Failed: " . $err->getMessage() . "\n";
+});
+
+// Non-blocking HTTP calls
+$http = new Kislay\Core\AsyncHttp();
+$http->get("https://api.example.com/data");
+$http->executeAsync()->then(function() use ($http) {
+    echo "HTTP Status: " . $http->getResponseCode() . "\n";
+});
 ```
 
 ## 🧩 Service Communication Quickstart

@@ -220,6 +220,35 @@ $response->unprocessableEntity(string $message = ''): void // 422 Unprocessable 
 $response->internalServerError(string $message = ''): void // 500 Internal Server Error
 ```
 
+### Kislay\\Core\\AsyncHttp Class
+
+Client for performing HTTP requests.
+
+#### Methods
+```php
+$http->get(string $url, array $params = []): void
+$http->post(string $url, array $data = []): void
+$http->put(string $url, array $data = []): void
+$http->patch(string $url, array $data = []): void
+$http->delete(string $url, array $data = []): void
+$http->setHeader(string $name, string $value): void
+$http->execute(): bool
+$http->executeAsync(): Kislay\Core\Promise
+$http->getResponse(): string
+$http->getResponseCode(): int
+```
+
+### Kislay\\Core\\Promise Class
+
+Represents the result of an asynchronous operation.
+
+#### Methods
+```php
+$promise->then(callable $onFulfilled, ?callable $onRejected = null): self
+$promise->catch(callable $onRejected): self
+$promise->finally(callable $onFinally): self
+```
+
 ### Kislay\\Core\\Next Class
 
 Used in middleware to continue processing the request chain.
@@ -227,6 +256,14 @@ Used in middleware to continue processing the request chain.
 ```php
 $next();  // Continue to next middleware/route handler
 ```
+
+### Global Functions
+
+#### async
+```php
+async(callable $task): Kislay\Core\Promise
+```
+Schedules a task to be executed in the background event loop. Requires `async` option to be enabled in the App.
 
 ## Usage Examples
 
@@ -374,6 +411,37 @@ $app->post('/register', function($req, $res) {
         'email' => $user['email'],
         'created_at' => $user['created_at']
     ]);
+});
+
+$app->listen('0.0.0.0', 8080);
+```
+
+### Asynchronous Handling
+```php
+<?php
+$app = new Kislay\\Core\\App();
+$app->setOption('async', true);
+
+$app->get('/async-task', function($req, $res) {
+    // Perform background work
+    async(function() {
+        return perform_heavy_task();
+    })->then(function($result) {
+        echo "Task completed: $result\n";
+    });
+
+    $res->send('Task started');
+});
+
+$app->get('/non-blocking-http', function($req, $res) {
+    $http = new Kislay\\Core\\AsyncHttp();
+    $http->get('https://api.example.com/data');
+    
+    $http->executeAsync()->then(function() use ($http) {
+        echo "Fetch done: " . $http->getResponseCode() . "\n";
+    });
+
+    $res->send('Fetch initiated');
 });
 
 $app->listen('0.0.0.0', 8080);
