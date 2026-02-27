@@ -40,8 +40,10 @@ kislayphp.http.threads = 4
 kislayphp.http.read_timeout_ms = 10000
 kislayphp.http.max_body = 0
 kislayphp.http.cors = 0
-kislayphp.http.log = 0
-kislayphp.http.async = 0
+kislayphp.http.log = 1
+kislayphp.http.async = 1
+kislayphp.http.async_threads = 4
+kislayphp.http.enable_gc = 1
 kislayphp.http.tls_cert = ""
 kislayphp.http.tls_key = ""
 ```
@@ -125,9 +127,10 @@ $app->setMaxBodySize(int $bytes): void
 
 ##### Feature Toggles
 ```php
-$app->enableCors(bool $enabled): void
-$app->enableLogging(bool $enabled): void
-$app->enableAsync(bool $enabled): void
+$app->enableCors(bool $enabled): void      // Default: false
+$app->enableLogging(bool $enabled): void   // Default: true (v0.0.2+)
+$app->enableAsync(bool $enabled): void     // Default: true (v0.0.2+)
+$app->enableGc(bool $enabled): void        // Default: true (v0.0.2+)
 ```
 
 ### Kislay\\Core\\Request Class
@@ -264,6 +267,25 @@ $next();  // Continue to next middleware/route handler
 async(callable $task): Kislay\Core\Promise
 ```
 Schedules a task to be executed in the background event loop. Requires `async` option to be enabled in the App.
+
+### Threading & Concurrency
+
+Kislay Core uses a hybrid threading model for asynchronous tasks. The behavior depends on whether your PHP build is Thread-Safe (ZTS) or Non-Thread-Safe (NTS):
+
+#### Non-Thread-Safe (NTS) PHP
+- **Mode**: Serialized Background Execution.
+- **Behavior**: Only one worker can access the PHP VM at a time. Tasks are enqueued and processed one after another.
+- **Best for**: I/O-bound tasks where waiting happens outside the VM (e.g., waiting for an external API response).
+
+#### Thread-Safe (ZTS) PHP
+- **Mode**: True Parallel Execution.
+- **Behavior**: Multiple workers can access their own PHP contexts simultaneously.
+- **Best for**: CPU-bound tasks (e.g., cryptography, image processing, large data analysis) that need to utilize multiple CPU cores.
+
+#### Configuration
+```php
+$app->setOption('async_threads', 4); // Set the number of background workers
+```
 
 ## Usage Examples
 
@@ -504,6 +526,7 @@ $app->listen('0.0.0.0', 8443, [
 | `kislayphp.http.cors` | 0 | Enable CORS headers |
 | `kislayphp.http.log` | 0 | Enable request logging |
 | `kislayphp.http.async` | 0 | Enable async processing |
+| `kislayphp.http.async_threads` | 1 | Number of background task workers |
 | `kislayphp.http.referrer_policy` | `strict-origin-when-cross-origin` | Default `Referrer-Policy` response header |
 | `kislayphp.http.tls_cert` | "" | Default SSL certificate path |
 | `kislayphp.http.tls_key` | "" | Default SSL private key path |

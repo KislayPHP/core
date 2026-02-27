@@ -38,3 +38,4 @@ bench/results/*
 php_test_results_*.txt
 *.orig
 *.rej
+server.log

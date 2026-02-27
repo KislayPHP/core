@@ -1,6 +1,6 @@
-# Updation List (Lifecycle APIs)
+# Updation List (Lifecycle & Multi-threading APIs)
 
-This list tracks updates for the non-blocking lifecycle work (`listenAsync`, `wait`, `isRunning`, `stop`) and how to validate them.
+This list tracks updates for the non-blocking lifecycle work, multi-threaded task workers, and how to validate them.
 
 ## 1) Runtime/API updates
 
@@ -8,6 +8,8 @@ This list tracks updates for the non-blocking lifecycle work (`listenAsync`, `wa
 - [x] Add lifecycle wait API: `wait(timeoutMs = -1)`
 - [x] Add running-state API: `isRunning()`
 - [x] Keep `stop()` idempotent and safe to call multiple times
+- [x] Multi-threaded worker pool for background tasks (`async_threads`)
+- [x] Enable `async`, `log`, and `gc` by default in v0.0.2
 
 ## 2) Regression coverage updates
 
@@ -27,6 +29,7 @@ This list tracks updates for the non-blocking lifecycle work (`listenAsync`, `wa
 
 - [x] Test commands documented in `tests/README.md`
 - [x] Task commands documented in `README.md`
+- [x] Threading model documented in `docs.md`
 
 ## 5) CI ecosystem updates
 

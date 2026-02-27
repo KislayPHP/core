@@ -8,12 +8,17 @@ extension_loaded('kislayphp_extension') or die('The kislayphp_extension is not l
 
 $app = new Kislay\Core\App();
 
-// 1. Enable asynchronous event loop (required for async() and executeAsync)
-$app->setOption('async', true);
+// Note: As of v0.0.2+, 'async' and 'enable_gc' are ENABLED by default.
+// You only need to call setOption if you wish to DISABLE them or tune them.
+// $app->setOption('async', false);
+// $app->setOption('enable_gc', false);
+
+// Configure background worker pool (Option 2: Task Workers)
+// For heavy CPU tasks on ZTS PHP, set this to match your core count.
+$app->setOption('async_threads', 4); 
 
 // Memory management settings
 $app->setMemoryLimit(128 * 1024 * 1024);
-$app->enableGc(true);
 
 $app->use(function ($req, $res, $next) {
     // Global middleware
@@ -118,7 +123,7 @@ $app->get('/inspect', function ($req, $res) {
 });
 
 // HTTP only
-$app->listen('0.0.0.0', 8081);
+$app->listen('0.0.0.0', 8089);
 
 // HTTPS example (requires civetweb built with OpenSSL)
 // $app->listen('0.0.0.0', 8443, ['cert' => '/path/to/cert.pem', 'key' => '/path/to/key.pem']);

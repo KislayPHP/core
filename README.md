@@ -11,7 +11,7 @@ A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with 
 ## ⚡ Key Features
 
 - 🚀 **High Performance**: 63K requests/second at 200 concurrency with 0.25ms P95 latency
-- 🔄 **Event-Driven**: Native Promise-based asynchronous architecture with a background event loop
+- 🔄 **Event-Driven**: Native Promise-based asynchronous architecture with a **multi-threaded worker pool**
 - 🔒 **Secure**: Built-in HTTPS/SSL support with TLS encryption
 - 🛠️ **Full PHP Compatibility**: Complete PHP processing without fast-path bypass
 - 🏗️ **Microservices Ready**: Lightweight server for containerized deployments
@@ -59,7 +59,8 @@ FROM php:8.2-cli
 $app = new Kislay\Core\App();
 
 // Configure server
-$app->setOption('num_threads', 4);
+$app->setOption('threads', 4);           // HTTP server threads (civetweb)
+$app->setOption('async_threads', 4);     // Background task workers (Kislay)
 $app->setOption('document_root', '/var/www');
 
 // Add middleware
@@ -91,8 +92,9 @@ $app->post('/api/users', function ($req, $res) {
 $app->listen('0.0.0.0', 8080);
 ```
 
-`num_threads` note:
-- On non-thread-safe PHP builds (`Thread Safety => disabled`), values above `1` are automatically clamped to `1` to prevent middleware/route instability.
+`threads` vs `async_threads` note:
+- `threads`: Controls the embedded HTTP server worker pool. On non-thread-safe PHP builds (`Thread Safety => disabled`), values above `1` are automatically clamped to `1` to prevent middleware/route instability.
+- `async_threads`: Controls the background task worker pool (used by `async()`).
 - Invalid option values now fall back to safe defaults with runtime warnings instead of hard failures.
 - On non-thread-safe PHP builds, `listen()`/`listenAsync()` enable NTS compatibility mode (disables Zend stack guard) to prevent request-time internal recursion errors.
 
@@ -126,10 +128,13 @@ if ($app->isRunning()) {
 
 ⚡ **Event-Driven Asynchrony**
 
-Kislay Core now features a native background event loop and Promise model for non-blocking task execution:
+Kislay Core features a native multi-threaded background event loop and Promise model (Enabled by default in v0.0.2+):
 
 ```php
-$app->setOption('async', true);
+// Already enabled by default
+// $app->setOption('async', true); 
+
+$app->setOption('async_threads', 4); // Scalable worker pool
 
 // Offload a heavy task to the background thread
 async(function() {
@@ -215,11 +220,14 @@ Kislay Core implements a hybrid threading model combining PHP execution with asy
 
 ```ini
 kislayphp.http.threads = 4
+kislayphp.http.async_threads = 4
 kislayphp.http.document_root = "/var/www"
 kislayphp.http.read_timeout_ms = 10000
 kislayphp.http.max_body = 1048576
 kislayphp.http.cors = 0
 kislayphp.http.log = 1
+kislayphp.http.async = 1
+kislayphp.http.enable_gc = 1
 kislayphp.http.referrer_policy = "strict-origin-when-cross-origin"
 kislayphp.http.tls_cert = "/path/to/cert.pem"
 kislayphp.http.tls_key = "/path/to/key.pem"
@@ -229,10 +237,13 @@ kislayphp.http.tls_key = "/path/to/key.pem"
 
 ```bash
 export KISLAYPHP_HTTP_THREADS=4
+export KISLAYPHP_ASYNC_THREADS=4
 export KISLAYPHP_HTTP_DOCUMENT_ROOT=/var/www
 export KISLAYPHP_HTTP_READ_TIMEOUT_MS=10000
 export KISLAYPHP_HTTP_MAX_BODY=1048576
 export KISLAYPHP_HTTP_LOG=1
+export KISLAYPHP_HTTP_ASYNC=1
+export KISLAYPHP_HTTP_ENABLE_GC=1
 export KISLAYPHP_HTTP_REFERRER_POLICY=strict-origin-when-cross-origin
 export KISLAYPHP_HTTP_TLS_CERT=/path/to/cert.pem
 export KISLAYPHP_HTTP_TLS_KEY=/path/to/key.pem

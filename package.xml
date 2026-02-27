@@ -14,7 +14,7 @@
     <email>kislayraj.89@gmail.com</email>
     <active>yes</active>
   </lead>
-  <date>2026-02-22</date>
+  <date>2026-02-28</date>
   <version>
     <release>0.0.2</release>
     <api>0.0.2</api>
@@ -24,7 +24,7 @@
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Added Referrer-Policy defaults/override support, explicit CORS-disabled preflight hints, and fixed unmatched-route behavior with path middleware headers.</notes>
+  <notes>Added multi-threaded background task worker pool (async_threads), updated default settings (async, logging, GC enabled by default), and improved ZTS compatibility.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />

@@ -1,12 +1,17 @@
 extern "C" {
 #include "php.h"
 #include "SAPI.h"
+#include "php_main.h"
 #include "ext/standard/info.h"
 #include "ext/standard/url.h"
 #include "ext/json/php_json.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_gc.h"
 #include "Zend/zend_smart_str.h"
+
+#if defined(ZTS)
+ZEND_TSRMLS_CACHE_EXTERN();
+#endif
 }
 
 #include <curl/curl.h>
@@ -39,9 +44,7 @@ extern "C" {
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if !defined(ZTS)
 static std::mutex kislay_php_mutex;
-#endif
 
 enum class PromiseState {
     Pending,
@@ -67,6 +70,10 @@ static inline php_kislay_promise_t *php_kislay_promise_from_obj(zend_object *obj
     return reinterpret_cast<php_kislay_promise_t *>(
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_promise_t, std));
 }
+
+#if defined(ZTS)
+ZEND_TSRMLS_CACHE_EXTERN();
+#endif
 
 namespace kislay {
 
@@ -109,7 +116,7 @@ struct KislayPHPSession {
 #if !defined(ZTS)
             kislay_php_mutex.unlock();
 #else
-            php_request_shutdown();
+            php_request_shutdown(nullptr);
 #endif
         }
     }
@@ -179,8 +186,9 @@ typedef struct _php_kislay_app_t {
     std::deque<KislayTask> task_queue;
     std::unique_ptr<std::mutex> task_mutex;
     std::unique_ptr<std::condition_variable> task_cv;
-    std::unique_ptr<std::thread> loop_thread;
+    std::vector<std::unique_ptr<std::thread>> worker_threads;
     std::atomic_bool loop_active;
+    int async_worker_count;
 
     // Async HTTP (libcurl multi)
     CURLM *multi_handle;
@@ -189,7 +197,8 @@ typedef struct _php_kislay_app_t {
     zend_object std;
 } php_kislay_app_t;
 
-static void kislay_event_loop(php_kislay_app_t *app);
+static void kislay_io_loop(php_kislay_app_t *app);
+static void kislay_worker_loop(php_kislay_app_t *app);
 
 static bool kislay_parse_long_strict(const char *value, zend_long *out) {
     if (value == nullptr || *value == '\0' || out == nullptr) {
@@ -316,6 +325,7 @@ ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     zend_bool cors_enabled;
     zend_bool log_enabled;
     zend_bool async_enabled;
+    zend_bool gc_enabled;
     char *document_root;
     char *tls_cert;
     char *tls_key;
@@ -335,8 +345,9 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("kislayphp.http.read_timeout_ms", "10000", PHP_INI_ALL, OnUpdateLong, read_timeout_ms, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.max_body", "0", PHP_INI_ALL, OnUpdateLong, max_body, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.cors", "0", PHP_INI_ALL, OnUpdateBool, cors_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
-    STD_PHP_INI_ENTRY("kislayphp.http.log", "0", PHP_INI_ALL, OnUpdateBool, log_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
-    STD_PHP_INI_ENTRY("kislayphp.http.async", "0", PHP_INI_ALL, OnUpdateBool, async_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.log", "1", PHP_INI_ALL, OnUpdateBool, log_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.async", "1", PHP_INI_ALL, OnUpdateBool, async_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
+    STD_PHP_INI_ENTRY("kislayphp.http.enable_gc", "1", PHP_INI_ALL, OnUpdateBool, gc_enabled, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.document_root", "", PHP_INI_ALL, OnUpdateString, document_root, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_cert", "", PHP_INI_ALL, OnUpdateString, tls_cert, zend_kislayphp_extension_globals, kislayphp_extension_globals)
     STD_PHP_INI_ENTRY("kislayphp.http.tls_key", "", PHP_INI_ALL, OnUpdateString, tls_key, zend_kislayphp_extension_globals, kislayphp_extension_globals)
@@ -367,9 +378,12 @@ static void kislay_app_stop_server(php_kislay_app_t *app) {
     if (app->loop_active.load(std::memory_order_relaxed)) {
         app->loop_active.store(false, std::memory_order_relaxed);
         app->task_cv->notify_all();
-        if (app->loop_thread && app->loop_thread->joinable()) {
-            app->loop_thread->join();
+        for (auto &thread : app->worker_threads) {
+            if (thread && thread->joinable()) {
+                thread->join();
+            }
         }
+        app->worker_threads.clear();
     }
 
     kislay_app_clear_active(app);
@@ -742,7 +756,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->ctx = nullptr;
     app->running.store(false, std::memory_order_relaxed);
     app->memory_limit_bytes = 0;
-    app->gc_after_request = true;
+    app->gc_after_request = kislay_env_bool("KISLAYPHP_HTTP_ENABLE_GC", KISLAYPHP_EXTENSION_G(gc_enabled) != 0);
     app->thread_count = kislay_sanitize_thread_count(
         kislay_env_long("KISLAYPHP_HTTP_THREADS", KISLAYPHP_EXTENSION_G(http_threads)),
         KISLAYPHP_EXTENSION_G(http_threads),
@@ -786,8 +800,9 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     new (&app->task_queue) std::deque<KislayTask>();
     new (&app->task_mutex) std::unique_ptr<std::mutex>(new std::mutex());
     new (&app->task_cv) std::unique_ptr<std::condition_variable>(new std::condition_variable());
-    new (&app->loop_thread) std::unique_ptr<std::thread>();
+    new (&app->worker_threads) std::vector<std::unique_ptr<std::thread>>();
     app->loop_active.store(false, std::memory_order_relaxed);
+    app->async_worker_count = static_cast<int>(kislay_env_long("KISLAYPHP_ASYNC_THREADS", 1));
 
     app->multi_handle = curl_multi_init();
     new (&app->curl_promises) std::unordered_map<CURL *, php_kislay_promise_t *>();
@@ -834,7 +849,7 @@ static void kislay_app_free_obj(zend_object *object) {
     app->lock.~unique_ptr();
     app->task_mutex.~unique_ptr();
     app->task_cv.~unique_ptr();
-    app->loop_thread.~unique_ptr();
+    app->worker_threads.~vector();
     zend_object_std_dtor(&app->std);
 }
 
@@ -3004,6 +3019,11 @@ PHP_METHOD(KislayApp, setOption) {
         app->async_enabled = kislay_zval_to_bool(value, app->async_enabled, "Kislay\\Core\\App::setOption(async)");
         RETURN_TRUE;
     }
+    if (key == "async_threads" || key == "async_worker_threads") {
+        app->async_worker_count = static_cast<int>(zval_get_long(value));
+        if (app->async_worker_count < 1) app->async_worker_count = 1;
+        RETURN_TRUE;
+    }
     if (key == "tls_cert") {
         zend_string *s = zval_get_string(value);
         std::string candidate(ZSTR_VAL(s), ZSTR_LEN(s));
@@ -3430,7 +3450,13 @@ PHP_METHOD(KislayApp, listen) {
 
     if (app->async_enabled) {
         app->loop_active.store(true, std::memory_order_relaxed);
-        app->loop_thread.reset(new std::thread(kislay_event_loop, app));
+        // Thread 0 is the IO Manager
+        app->worker_threads.push_back(std::unique_ptr<std::thread>(new std::thread(kislay_io_loop, app)));
+        
+        // Threads 1..N are dedicated Task Workers
+        for (int i = 1; i < app->async_worker_count; ++i) {
+            app->worker_threads.push_back(std::unique_ptr<std::thread>(new std::thread(kislay_worker_loop, app)));
+        }
     }
 
     kislay_app_wait_loop(app, -1);
@@ -3499,7 +3525,13 @@ PHP_METHOD(KislayApp, listenAsync) {
 
     if (app->async_enabled) {
         app->loop_active.store(true, std::memory_order_relaxed);
-        app->loop_thread.reset(new std::thread(kislay_event_loop, app));
+        // Thread 0 is the IO Manager
+        app->worker_threads.push_back(std::unique_ptr<std::thread>(new std::thread(kislay_io_loop, app)));
+        
+        // Threads 1..N are dedicated Task Workers
+        for (int i = 1; i < app->async_worker_count; ++i) {
+            app->worker_threads.push_back(std::unique_ptr<std::thread>(new std::thread(kislay_worker_loop, app)));
+        }
     }
 
     RETURN_TRUE;
@@ -3974,7 +4006,66 @@ static void kislay_promise_dispatch(php_kislay_promise_t *promise) {
     other.clear();
 }
 
-static void kislay_event_loop(php_kislay_app_t *app) {
+static void kislay_worker_loop(php_kislay_app_t *app) {
+#if defined(ZTS)
+    void ***tsrm_ls = (void ***) ts_resource(0);
+    TSRMLS_CACHE_UPDATE();
+    if (php_request_startup() == FAILURE) {
+        return;
+    }
+#endif
+
+    while (app->loop_active.load(std::memory_order_relaxed)) {
+        KislayTask task;
+        bool has_task = false;
+
+        {
+            std::unique_lock<std::mutex> lock(*app->task_mutex);
+            if (app->task_queue.empty()) {
+                app->task_cv->wait_for(lock, std::chrono::milliseconds(50));
+            }
+            if (!app->task_queue.empty()) {
+                task = std::move(app->task_queue.front());
+                app->task_queue.pop_front();
+                has_task = true;
+            }
+        }
+
+        if (has_task) {
+#if !defined(ZTS)
+            std::lock_guard<std::mutex> php_lock(kislay_php_mutex);
+#endif
+            zval retval;
+            if (kislay_call_php(&task.callable, 0, nullptr, &retval)) {
+                if (EG(exception)) {
+                    zval ex_obj;
+                    ZVAL_OBJ(&ex_obj, EG(exception));
+                    GC_ADDREF(EG(exception));
+                    zend_clear_exception();
+                    kislay_promise_reject(task.promise, &ex_obj);
+                    zval_ptr_dtor(&ex_obj);
+                } else {
+                    kislay_promise_resolve(task.promise, &retval);
+                    zval_ptr_dtor(&retval);
+                }
+            } else {
+                zval error;
+                ZVAL_STRING(&error, "Async worker task failed");
+                kislay_promise_reject(task.promise, &error);
+                zval_ptr_dtor(&error);
+            }
+            zval_ptr_dtor(&task.callable);
+            kislay_promise_dispatch(task.promise);
+            OBJ_RELEASE(&task.promise->std);
+        }
+    }
+
+#if defined(ZTS)
+    php_request_shutdown(nullptr);
+#endif
+}
+
+static void kislay_io_loop(php_kislay_app_t *app) {
 #if defined(ZTS)
     void ***tsrm_ls = (void ***) ts_resource(0);
     TSRMLS_CACHE_UPDATE();
@@ -3996,7 +4087,7 @@ static void kislay_event_loop(php_kislay_app_t *app) {
 #if !defined(ZTS)
             std::lock_guard<std::mutex> php_lock(kislay_php_mutex);
 #endif
-            // 2. Handle Task Queue
+            // 2. Handle Task Queue (IO thread also helps with tasks)
             while (true) {
                 KislayTask task;
                 {
@@ -4084,7 +4175,7 @@ static void kislay_event_loop(php_kislay_app_t *app) {
     }
 
 #if defined(ZTS)
-    php_request_shutdown();
+    php_request_shutdown(nullptr);
 #endif
 }
 
@@ -4303,8 +4394,9 @@ static PHP_GINIT_FUNCTION(kislayphp_extension) {
     kislayphp_extension_globals->read_timeout_ms = 10000;
     kislayphp_extension_globals->max_body = 0;
     kislayphp_extension_globals->cors_enabled = 0;
-    kislayphp_extension_globals->log_enabled = 0;
-    kislayphp_extension_globals->async_enabled = 0;
+    kislayphp_extension_globals->log_enabled = 1;
+    kislayphp_extension_globals->async_enabled = 1;
+    kislayphp_extension_globals->gc_enabled = 1;
     kislayphp_extension_globals->document_root = nullptr;
     kislayphp_extension_globals->tls_cert = nullptr;
     kislayphp_extension_globals->tls_key = nullptr;

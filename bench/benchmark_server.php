@@ -39,6 +39,13 @@ $app->get('/json', function ($req, $res) {
     ]);
 });
 
+$app->get('/async', function ($req, $res) {
+    async(function() {
+        return 42;
+    });
+    $res->send('ok');
+});
+
 $app->get('/file', function ($req, $res) use ($bigFile) {
     $res->sendFile($bigFile, 'application/octet-stream');
 });
