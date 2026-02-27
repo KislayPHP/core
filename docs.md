@@ -238,9 +238,14 @@ $http->delete(string $url, array $data = []): void
 $http->setHeader(string $name, string $value): void
 $http->execute(): bool
 $http->executeAsync(): Kislay\Core\Promise
+$http->retry(int $maxRetries, int $delayMs = 1000): self
 $http->getResponse(): string
 $http->getResponseCode(): int
 ```
+
+#### Resilience and Tracing
+- **Retries**: `AsyncHttp` can automatically retry failed requests (network errors). Call `retry($count, $delay)` before `executeAsync()`.
+- **Correlation ID Propagation**: `AsyncHttp` automatically looks for an `X-Correlation-ID` in the current incoming request and propagates it to outgoing calls. If no ID is present, it generates a unique one (UUID v4 style) for the active request context.
 
 ### Kislay\\Core\\Promise Class
 

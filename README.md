@@ -145,9 +145,11 @@ async(function() {
     echo "Failed: " . $err->getMessage() . "\n";
 });
 
-// Non-blocking HTTP calls
+// Non-blocking HTTP calls with automatic retries and Correlation-ID propagation
 $http = new Kislay\Core\AsyncHttp();
-$http->get("https://api.example.com/data");
+$http->get("https://api.example.com/data")
+     ->retry(3, 500); // Retry 3 times with 500ms delay on failure
+
 $http->executeAsync()->then(function() use ($http) {
     echo "HTTP Status: " . $http->getResponseCode() . "\n";
 });
