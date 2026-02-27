@@ -186,33 +186,31 @@ Checklist: `docs/PRODUCTION_READINESS_CHECKLIST.md`
 
 ## 🏗️ Architecture
 
-Kislay Core implements a hybrid threading model combining PHP execution with asynchronous I/O:
+Kislay Core implements a hybrid threading model combining HTTP multiplexing with a dedicated background worker pool:
 
 ```
-┌─────────────────┐    ┌─────────────────┐
-│   PHP Worker    │    │   PHP Worker    │
-│   Thread 1      │    │   Thread N      │
-│                 │    │                 │
-│ ┌─────────────┐ │    │ ┌─────────────┐ │
-│ │ embedded HTTP server    │ │    │ │ embedded HTTP server    │ │
-│ │ Server      │ │    │ │ Server      │ │
-│ │ Socket      │ │    │ │ Socket      │ │
-│ │ Multiplex   │ │    │ │ Multiplex   │ │
-│ └─────────────┘ │    │ └─────────────┘ │
-└─────────────────┘    └─────────────────┘
-         │                       │
-         └───────────────────────┘
-              Shared Memory
+┌───────────────────────────┐      ┌───────────────────────────┐
+│      HTTP IO Manager      │      │    Task Worker Pool       │
+│  (embedded HTTP server)   │      │   (async_threads = N)     │
+├─────────────┬─────────────┤      ├─────────────┬─────────────┤
+│  Thread 1   │  Thread M   │      │  Worker 1   │  Worker N   │
+└──────┬──────┴──────┬──────┘      └──────┬──────┴──────┬──────┘
+       │             │                    │             │
+       └─────────────┴──────────┬─────────┴─────────────┘
+                                │
+                         Shared PHP VM
+                    (ZTS Parallel / NTS Serial)
 ```
 
 ## 📊 Performance
 
-**Benchmark Results (200 concurrent connections):**
-- **Throughput**: 63K requests/second
+**Benchmark Results (200 concurrent connections, 4 IO threads, 4 workers):**
+- **Throughput**: 63K requests/second (Plaintext) / 48K requests/second (JSON)
 - **P95 Latency**: 0.25ms
 - **P99 Latency**: 0.45ms
-- **CPU Usage**: 11.4%
-- **Memory**: 6.0MB (stable)
+- **Async Scalability**: Linear CPU utilization for background tasks on ZTS PHP
+- **CPU Usage**: 11.4% (Idle/Baseline)
+- **Memory**: 6.0MB (Stable/No-leak)
 
 ## 🔧 Configuration
 
