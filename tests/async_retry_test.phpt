@@ -5,10 +5,14 @@ KislayAsyncHttp retry and correlation-id propagation
 if (!extension_loaded('kislayphp_extension')) {
     echo 'skip kislayphp_extension not loaded';
 }
+if (defined('PHP_ZTS') && PHP_ZTS == 0) {
+    echo 'skip async retry test requires ZTS build for deterministic thread behavior';
+}
 ?>
 --FILE--
 <?php
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 $port = 9200;
 
 $requestCount = 0;

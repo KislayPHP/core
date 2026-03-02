@@ -9,6 +9,7 @@ if (!extension_loaded('kislayphp_extension')) {
 --FILE--
 <?php
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 
 try {
     $app->wait(-2);

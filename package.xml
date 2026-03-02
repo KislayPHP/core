@@ -16,15 +16,15 @@
   </lead>
   <date>2026-02-28</date>
   <version>
-    <release>0.0.2</release>
-    <api>0.0.2</api>
+    <release>0.0.4</release>
+    <api>0.0.4</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Added multi-threaded background task worker pool (async_threads), updated default settings (async, logging, GC enabled by default), and improved ZTS compatibility.</notes>
+  <notes>Fixed request context safety by moving active request tracking to thread-local storage, keeping correlation header propagation request-scoped under concurrency.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />

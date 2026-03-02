@@ -37,6 +37,7 @@
     "suggest": {
         "kislayphp/eventbus": "Real-time communication for microservices",
         "kislayphp/config": "Dynamic configuration management",
+        "kislayphp/persistence": "Request-safe PDO transaction and cache guard runtime",
         "kislayphp/discovery": "Service discovery and registration",
         "kislayphp/gateway": "API gateway with load balancing",
         "kislayphp/metrics": "Comprehensive metrics collection",

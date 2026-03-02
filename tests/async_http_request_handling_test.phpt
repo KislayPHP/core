@@ -33,6 +33,7 @@ $port = reserve_free_port();
 $base = "http://{$host}:{$port}";
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 $app->get('/search', function ($req, $res) {
     $res->json(['q' => $req->query('q')], 200);
 });

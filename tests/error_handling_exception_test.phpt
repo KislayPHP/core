@@ -50,6 +50,7 @@ $host = '127.0.0.1';
 $port = reserve_free_port();
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 $app->get('/boom', function ($req, $res) {
     throw new Exception('boom');
 });

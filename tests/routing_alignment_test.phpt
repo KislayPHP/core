@@ -57,6 +57,7 @@ $host = '127.0.0.1';
 $port = reserve_free_port();
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 $app->use('/api', function ($req, $res, $next) {
     $res->set('X-Scoped', '1');
     $next();

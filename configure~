@@ -886,6 +886,7 @@ with_php_config
 enable_
 enable_kislayphp_extension
 with_civetweb
+with_curl
 enable_shared
 enable_static
 enable_fast_install
@@ -1541,6 +1542,7 @@ Optional Features and Packages:
 Extension:
   --enable-kislayphp_extension   Enable kislayphp_extension support
   --with-civetweb=DIR     Path to civetweb install prefix
+  --with-curl=DIR         Path to curl install prefix
 
 Libtool:
   --enable-shared=PKGS    Build shared libraries default=yes
@@ -5069,6 +5071,32 @@ printf "%s\n" "$ext_output" >&6; }
 
 
 
+
+php_with_curl=yes
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl support" >&5
+printf %s "checking for curl support... " >&6; }
+
+# Check whether --with-curl was given.
+if test ${with_curl+y}
+then :
+  withval=$with_curl; PHP_CURL=$withval
+else case e in #(
+  e)
+  PHP_CURL=yes
+
+ ;;
+esac
+fi
+
+
+ext_output=$PHP_CURL
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ext_output" >&5
+printf "%s\n" "$ext_output" >&6; }
+
+
+
+
 if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
 
 
@@ -5616,7 +5644,7 @@ fi
       CIVETWEB_DIR=$PHP_CIVETWEB
 
 for include_path in $CIVETWEB_DIR/include; do
-  if test "$include_path" != "$PHP_OS_SDKPATH/usr/include"
+  if test "$include_path" != "/usr/include"
 then :
 
 
@@ -5626,7 +5654,11 @@ then :
 
     ep_dir=$(echo $include_path|$SED 's%/*[^/][^/]*/*$%%')
 
-    ep_realdir=$(cd "$ep_dir" && pwd)
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
     ai_p="$ep_realdir"/$(basename "$include_path")
   fi
 
@@ -5648,7 +5680,7 @@ done
       CIVETWEB_INCLUDE_DIR=`pwd`/third_party/civetweb/include
 
 for include_path in $CIVETWEB_INCLUDE_DIR; do
-  if test "$include_path" != "$PHP_OS_SDKPATH/usr/include"
+  if test "$include_path" != "/usr/include"
 then :
 
 
@@ -5658,7 +5690,11 @@ then :
 
     ep_dir=$(echo $include_path|$SED 's%/*[^/][^/]*/*$%%')
 
-    ep_realdir=$(cd "$ep_dir" && pwd)
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
     ai_p="$ep_realdir"/$(basename "$include_path")
   fi
 
@@ -5675,6 +5711,356 @@ then :
 
 fi
 done
+
+    fi
+  fi
+
+  if test "$PHP_CURL" != "no"; then
+    if test "$PHP_CURL" != "yes"; then
+      CURL_DIR=$PHP_CURL
+
+for include_path in $CURL_DIR/include; do
+  if test "$include_path" != "/usr/include"
+then :
+
+
+  if test -z "$include_path" || echo "$include_path" | grep '^/' >/dev/null ; then
+    ai_p=$include_path
+  else
+
+    ep_dir=$(echo $include_path|$SED 's%/*[^/][^/]*/*$%%')
+
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
+    ai_p="$ep_realdir"/$(basename "$include_path")
+  fi
+
+
+
+  unique=$(echo $ai_p|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$INCLUDEPATH$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "INCLUDEPATH$unique=set"
+    INCLUDES="$INCLUDES -I$ai_p"
+  fi
+
+
+fi
+done
+
+
+
+  if test "$ext_shared" = "yes"; then
+    KISLAYPHP_EXTENSION_SHARED_LIBADD="-lcurl $KISLAYPHP_EXTENSION_SHARED_LIBADD"
+    if test -n "$CURL_DIR/lib"; then
+
+  if test "$CURL_DIR/lib" != "/usr/$PHP_LIBDIR" && test "$CURL_DIR/lib" != "/usr/lib"; then
+
+  if test -z "$CURL_DIR/lib" || echo "$CURL_DIR/lib" | grep '^/' >/dev/null ; then
+    ai_p=$CURL_DIR/lib
+  else
+
+    ep_dir=$(echo $CURL_DIR/lib|$SED 's%/*[^/][^/]*/*$%%')
+
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
+    ai_p="$ep_realdir"/$(basename "$CURL_DIR/lib")
+  fi
+
+
+      if test "$ext_shared" = "yes"; then
+        KISLAYPHP_EXTENSION_SHARED_LIBADD="-L$ai_p $KISLAYPHP_EXTENSION_SHARED_LIBADD"
+        test -n "$ld_runpath_switch" && KISLAYPHP_EXTENSION_SHARED_LIBADD="$ld_runpath_switch$ai_p $KISLAYPHP_EXTENSION_SHARED_LIBADD"
+      else
+
+
+
+  unique=$(echo $ai_p|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$LIBPATH$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "LIBPATH$unique=set"
+
+    test -n "$ld_runpath_switch" && LDFLAGS="$LDFLAGS $ld_runpath_switch$ai_p"
+    LDFLAGS="$LDFLAGS -L$ai_p"
+    PHP_RPATHS="$PHP_RPATHS $ai_p"
+
+  fi
+
+
+      fi
+
+  fi
+
+    fi
+  else
+
+
+  if test -n "$CURL_DIR/lib"; then
+
+  if test "$CURL_DIR/lib" != "/usr/$PHP_LIBDIR" && test "$CURL_DIR/lib" != "/usr/lib"; then
+
+  if test -z "$CURL_DIR/lib" || echo "$CURL_DIR/lib" | grep '^/' >/dev/null ; then
+    ai_p=$CURL_DIR/lib
+  else
+
+    ep_dir=$(echo $CURL_DIR/lib|$SED 's%/*[^/][^/]*/*$%%')
+
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
+    ai_p="$ep_realdir"/$(basename "$CURL_DIR/lib")
+  fi
+
+
+
+
+
+  unique=$(echo $ai_p|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$LIBPATH$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "LIBPATH$unique=set"
+
+    test -n "$ld_runpath_switch" && LDFLAGS="$LDFLAGS $ld_runpath_switch$ai_p"
+    LDFLAGS="$LDFLAGS -L$ai_p"
+    PHP_RPATHS="$PHP_RPATHS $ai_p"
+
+  fi
+
+
+
+  fi
+
+  fi
+
+
+  case curl in
+  c|c_r) ;;
+  *)
+      LIBS="-lcurl $LIBS"
+   ;;
+  esac
+
+
+
+
+  fi
+
+
+    else
+
+  save_old_LDFLAGS=$LDFLAGS
+  ac_stuff=""
+
+  save_ext_shared=$ext_shared
+  ext_shared=yes
+
+  for ac_i in $ac_stuff; do
+    case $ac_i in #(
+  -pthread) :
+
+        if test "x$ext_shared" = xyes
+then :
+  LDFLAGS="$LDFLAGS -pthread"
+else case e in #(
+  e)
+
+
+  unique=$(echo $ac_i|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$EXTRA_LDFLAGS$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "EXTRA_LDFLAGS$unique=set"
+    EXTRA_LDFLAGS="$EXTRA_LDFLAGS $ac_i"
+  fi
+
+
+
+  unique=$(echo $ac_i|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$EXTRA_LDFLAGS_PROGRAM$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "EXTRA_LDFLAGS_PROGRAM$unique=set"
+    EXTRA_LDFLAGS_PROGRAM="$EXTRA_LDFLAGS_PROGRAM $ac_i"
+  fi
+
+         ;;
+esac
+fi
+       ;; #(
+  -l*) :
+
+        ac_ii=$(echo $ac_i|cut -c 3-)
+
+
+  case $ac_ii in
+  c|c_r) ;;
+  *)
+    if test "$ext_shared" = "yes"; then
+        LDFLAGS="$LDFLAGS -l$ac_ii"
+    else
+
+
+  case $ac_ii in
+  c|c_r) ;;
+  *)
+      LIBS="$LIBS -l$ac_ii"
+   ;;
+  esac
+
+
+    fi
+   ;;
+  esac
+
+
+       ;; #(
+  -L*) :
+
+        ac_ii=$(echo $ac_i|cut -c 3-)
+
+  if test "$ac_ii" != "/usr/$PHP_LIBDIR" && test "$ac_ii" != "/usr/lib"; then
+
+  if test -z "$ac_ii" || echo "$ac_ii" | grep '^/' >/dev/null ; then
+    ai_p=$ac_ii
+  else
+
+    ep_dir=$(echo $ac_ii|$SED 's%/*[^/][^/]*/*$%%')
+
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
+    ai_p="$ep_realdir"/$(basename "$ac_ii")
+  fi
+
+
+      if test "$ext_shared" = "yes"; then
+        LDFLAGS="-L$ai_p $LDFLAGS"
+        test -n "$ld_runpath_switch" && LDFLAGS="$ld_runpath_switch$ai_p $LDFLAGS"
+      else
+
+
+
+  unique=$(echo $ai_p|$SED 's/[^a-zA-Z0-9]/_/g')
+
+  cmd="echo $ac_n \"\$LIBPATH$unique$ac_c\""
+  if test -n "$unique" && test "$(eval $cmd)" = "" ; then
+    eval "LIBPATH$unique=set"
+
+    test -n "$ld_runpath_switch" && LDFLAGS="$LDFLAGS $ld_runpath_switch$ai_p"
+    LDFLAGS="$LDFLAGS -L$ai_p"
+    PHP_RPATHS="$PHP_RPATHS $ai_p"
+
+  fi
+
+
+      fi
+
+  fi
+
+       ;; #(
+  *) :
+     ;;
+esac
+  done
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl_easy_init in -lcurl" >&5
+printf %s "checking for curl_easy_init in -lcurl... " >&6; }
+if test ${ac_cv_lib_curl_curl_easy_init+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lcurl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char curl_easy_init (void);
+int
+main (void)
+{
+return curl_easy_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_curl_curl_easy_init=yes
+else case e in #(
+  e) ac_cv_lib_curl_curl_easy_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curl_curl_easy_init" >&5
+printf "%s\n" "$ac_cv_lib_curl_curl_easy_init" >&6; }
+if test "x$ac_cv_lib_curl_curl_easy_init" = xyes
+then :
+
+    LDFLAGS=$save_old_LDFLAGS
+    ext_shared=$save_ext_shared
+
+
+
+  case curl in
+  c|c_r) ;;
+  *)
+    if test "$ext_shared" = "yes"; then
+        KISLAYPHP_EXTENSION_SHARED_LIBADD="-lcurl $KISLAYPHP_EXTENSION_SHARED_LIBADD"
+    else
+
+
+  case curl in
+  c|c_r) ;;
+  *)
+      LIBS="-lcurl $LIBS"
+   ;;
+  esac
+
+
+    fi
+   ;;
+  esac
+
+
+
+
+else case e in #(
+  e)
+    LDFLAGS=$save_old_LDFLAGS
+    ext_shared=$save_ext_shared
+    unset ac_cv_lib_curl_curl_easy_init
+
+        as_fn_error $? "curl library not found" "$LINENO" 5
+
+   ;;
+esac
+fi
 
     fi
   fi
@@ -5777,7 +6163,7 @@ fi
       ac_ii=$(echo $ac_i|cut -c 3-)
 
 for include_path in $ac_ii; do
-  if test "$include_path" != "$PHP_OS_SDKPATH/usr/include"
+  if test "$include_path" != "/usr/include"
 then :
 
 
@@ -5787,7 +6173,11 @@ then :
 
     ep_dir=$(echo $include_path|$SED 's%/*[^/][^/]*/*$%%')
 
-    ep_realdir=$(cd "$ep_dir" && pwd)
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
     ai_p="$ep_realdir"/$(basename "$include_path")
   fi
 
@@ -5874,7 +6264,7 @@ fi
 
         ac_ii=$(echo $ac_i|cut -c 3-)
 
-  if test "$ac_ii" != "$PHP_OS_SDKPATH/usr/$PHP_LIBDIR" && test "$ac_ii" != "/usr/lib"; then
+  if test "$ac_ii" != "/usr/$PHP_LIBDIR" && test "$ac_ii" != "/usr/lib"; then
 
   if test -z "$ac_ii" || echo "$ac_ii" | grep '^/' >/dev/null ; then
     ai_p=$ac_ii
@@ -5882,7 +6272,11 @@ fi
 
     ep_dir=$(echo $ac_ii|$SED 's%/*[^/][^/]*/*$%%')
 
-    ep_realdir=$(cd "$ep_dir" && pwd)
+    if test -z $ep_dir ; then
+      ep_realdir=$(pwd)
+    else
+      ep_realdir=$(cd "$ep_dir" && pwd)
+    fi
     ai_p="$ep_realdir"/$(basename "$ac_ii")
   fi
 
@@ -5916,6 +6310,32 @@ fi
      ;;
 esac
   done
+
+
+
+  case stdc++ in
+  c|c_r) ;;
+  *)
+    if test "$ext_shared" = "yes"; then
+        KISLAYPHP_EXTENSION_SHARED_LIBADD="-lstdc++ $KISLAYPHP_EXTENSION_SHARED_LIBADD"
+    else
+
+
+  case stdc++ in
+  c|c_r) ;;
+  *)
+      LIBS="-lstdc++ $LIBS"
+   ;;
+  esac
+
+
+    fi
+   ;;
+  esac
+
+
+
+  PHP_VAR_SUBST="$PHP_VAR_SUBST KISLAYPHP_EXTENSION_SHARED_LIBADD"
 
 
   CFLAGS="$CFLAGS -DOPENSSL_API_3_0"
@@ -6175,6 +6595,7 @@ EOF
   fi
 
 fi
+
 
 enable_static=no
 enable_shared=yes
@@ -6768,7 +7189,7 @@ ia64-*-hpux*)
   ;;
 *-*-irix6*)
   # Find out which ABI we are using.
-  echo '#line 6771 "configure"' > conftest.$ac_ext
+  echo '#line 7192 "configure"' > conftest.$ac_ext
   if { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_compile\""; } >&5
   (eval $ac_compile) 2>&5
   ac_status=$?
@@ -8279,7 +8700,7 @@ else case e in #(
       LDFLAGS="$LDFLAGS -Wl,-exported_symbols_list,conftest.sym"
 
 cat > conftest.$ac_ext <<EOF
-#line 8282 "configure"
+#line 8703 "configure"
 #include "confdefs.h"
 int main(void) {
 ; return 0; }
@@ -8441,11 +8862,11 @@ else case e in #(
    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
    -e 's:$: $lt_compiler_flag:'`
-   (eval echo "\"configure:8444: $lt_compile\"" >&5)
+   (eval echo "\"configure:8865: $lt_compile\"" >&5)
    (eval "$lt_compile" 2>conftest.err)
    ac_status=$?
    cat conftest.err >&5
-   echo "configure:8448: \$? = $ac_status" >&5
+   echo "configure:8869: \$? = $ac_status" >&5
    if (exit $ac_status) && test -s "$ac_outfile"; then
      # The compiler can only warn and ignore the option if not recognized
      # So say no if there are warnings other than the usual output.
@@ -8741,11 +9162,11 @@ else case e in #(
    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
    -e 's:$: $lt_compiler_flag:'`
-   (eval echo "\"configure:8744: $lt_compile\"" >&5)
+   (eval echo "\"configure:9165: $lt_compile\"" >&5)
    (eval "$lt_compile" 2>conftest.err)
    ac_status=$?
    cat conftest.err >&5
-   echo "configure:8748: \$? = $ac_status" >&5
+   echo "configure:9169: \$? = $ac_status" >&5
    if (exit $ac_status) && test -s "$ac_outfile"; then
      # The compiler can only warn and ignore the option if not recognized
      # So say no if there are warnings other than the usual output.
@@ -8849,11 +9270,11 @@ else case e in #(
    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
    -e 's:$: $lt_compiler_flag:'`
-   (eval echo "\"configure:8852: $lt_compile\"" >&5)
+   (eval echo "\"configure:9273: $lt_compile\"" >&5)
    (eval "$lt_compile" 2>out/conftest.err)
    ac_status=$?
    cat out/conftest.err >&5
-   echo "configure:8856: \$? = $ac_status" >&5
+   echo "configure:9277: \$? = $ac_status" >&5
    if (exit $ac_status) && test -s out/conftest2.$ac_objext
    then
      # The compiler can only warn and ignore the option if not recognized
@@ -9314,7 +9735,7 @@ _LT_EOF
        # Determine the default libpath from the value encoded in an empty executable.
 
 cat > conftest.$ac_ext <<EOF
-#line 9317 "configure"
+#line 9738 "configure"
 #include "confdefs.h"
 int main(void) {
 ; return 0; }
@@ -9356,7 +9777,7 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
 	 # Determine the default libpath from the value encoded in an empty executable.
 
 cat > conftest.$ac_ext <<EOF
-#line 9359 "configure"
+#line 9780 "configure"
 #include "confdefs.h"
 int main(void) {
 ; return 0; }
@@ -10937,7 +11358,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<EOF
-#line 10940 "configure"
+#line 11361 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H
@@ -11036,7 +11457,7 @@ else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
   lt_status=$lt_dlunknown
   cat > conftest.$ac_ext <<EOF
-#line 11039 "configure"
+#line 11460 "configure"
 #include "confdefs.h"
 
 #if HAVE_DLFCN_H
@@ -12105,7 +12526,7 @@ case $host_os in
       # Determine the default libpath from the value encoded in an empty executable.
 
 cat > conftest.$ac_ext <<EOF
-#line 12108 "configure"
+#line 12529 "configure"
 #include "confdefs.h"
 int main(void) {
 ; return 0; }
@@ -12148,7 +12569,7 @@ if test -z "$aix_libpath"; then aix_libpath="/usr/lib:/lib"; fi
 	# Determine the default libpath from the value encoded in an empty executable.
 
 cat > conftest.$ac_ext <<EOF
-#line 12151 "configure"
+#line 12572 "configure"
 #include "confdefs.h"
 int main(void) {
 ; return 0; }
@@ -13401,11 +13822,11 @@ else case e in #(
    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
    -e 's:$: $lt_compiler_flag:'`
-   (eval echo "\"configure:13404: $lt_compile\"" >&5)
+   (eval echo "\"configure:13825: $lt_compile\"" >&5)
    (eval "$lt_compile" 2>conftest.err)
    ac_status=$?
    cat conftest.err >&5
-   echo "configure:13408: \$? = $ac_status" >&5
+   echo "configure:13829: \$? = $ac_status" >&5
    if (exit $ac_status) && test -s "$ac_outfile"; then
      # The compiler can only warn and ignore the option if not recognized
      # So say no if there are warnings other than the usual output.
@@ -13509,11 +13930,11 @@ else case e in #(
    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
    -e 's:$: $lt_compiler_flag:'`
-   (eval echo "\"configure:13512: $lt_compile\"" >&5)
+   (eval echo "\"configure:13933: $lt_compile\"" >&5)
    (eval "$lt_compile" 2>out/conftest.err)
    ac_status=$?
    cat out/conftest.err >&5
-   echo "configure:13516: \$? = $ac_status" >&5
+   echo "configure:13937: \$? = $ac_status" >&5
    if (exit $ac_status) && test -s out/conftest2.$ac_objext
    then
      # The compiler can only warn and ignore the option if not recognized

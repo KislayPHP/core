@@ -60,6 +60,7 @@ $host = '127.0.0.1';
 $port = reserve_free_port();
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 if ($app->setOption('num_threads', 1) !== true) {
     fail('setOption(num_threads) failed');
 }

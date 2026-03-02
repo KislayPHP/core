@@ -49,6 +49,7 @@ set_error_handler(function ($errno, $errstr) use (&$warnings) {
 });
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
 if ($app->setOption('num_threads', 0) !== true) fail('setOption(num_threads) failed');
 if ($app->setOption('request_timeout_ms', -100) !== true) fail('setOption(request_timeout_ms) failed');
 if ($app->setOption('max_body', -1) !== true) fail('setOption(max_body) failed');

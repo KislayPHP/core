@@ -1,5 +1,5 @@
 --TEST--
-Kislay Core returns 404 for unmatched routes even when path middleware sets headers
+Kislay Core executes onRequestStart and onRequestEnd hooks for each request
 --SKIPIF--
 <?php
 if (!extension_loaded('kislayphp_extension')) {
@@ -33,51 +33,53 @@ function make_request($host, $port, $method, $path) {
     if (!$fp) {
         fail("Failed to connect: {$errstr}");
     }
-    $request = "{$method} {$path} HTTP/1.1\r\n";
-    $request .= "Host: {$host}:{$port}\r\n";
-    $request .= "Connection: close\r\n\r\n";
+
+    $request = "{$method} {$path} HTTP/1.1\r\nHost: {$host}:{$port}\r\nConnection: close\r\n\r\n";
     fwrite($fp, $request);
     $response = stream_get_contents($fp);
     fclose($fp);
+
     if ($response === false || $response === '') {
         fail('Empty response');
     }
+
     return $response;
 }
 
 $host = '127.0.0.1';
 $port = reserve_free_port();
+$startCount = 0;
+$endCount = 0;
 
 $app = new Kislay\Core\App();
 $app->setOption('log', false);
-$app->use('/api', function ($req, $res, $next) {
-    $res->set('X-Powered-By', 'Kislay');
-    $next();
+$app->onRequestStart(function ($req, $res) use (&$startCount) {
+    $startCount++;
 });
-
-$app->get('/api/users', function ($req, $res) {
+$app->onRequestEnd(function ($req, $res) use (&$endCount) {
+    $endCount++;
+});
+$app->get('/health', function ($req, $res) {
     $res->json(['ok' => true], 200);
 });
 
 if (!$app->listenAsync($host, $port)) {
     fail('listenAsync failed');
 }
-usleep(150000);
 
-$response = make_request($host, $port, 'GET', '/api/site/home');
+usleep(150000);
+$response = make_request($host, $port, 'GET', '/health');
 $app->stop();
 
 $status = strtok($response, "\r\n");
-if ($status === false || strpos($status, '404') === false) {
-    fail("Expected 404 for unmatched route, got: {$status}");
+if ($status === false || strpos($status, '200') === false) {
+    fail("Expected 200 response, got: {$status}");
 }
-
-if (stripos($response, "x-powered-by: Kislay") === false) {
-    fail('Expected path middleware header in response');
+if ($startCount !== 1) {
+    fail("Expected onRequestStart count=1, got {$startCount}");
 }
-
-if (strpos($response, 'Not Found') === false) {
-    fail('Expected Not Found response body');
+if ($endCount !== 1) {
+    fail("Expected onRequestEnd count=1, got {$endCount}");
 }
 
 echo "OK\n";

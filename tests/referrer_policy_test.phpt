@@ -51,6 +51,7 @@ function make_request($host, $port, $method, $path, array $headers = []) {
 $host = '127.0.0.1';
 
 $appDefault = new Kislay\Core\App();
+$appDefault->setOption('log', false);
 if ($appDefault->setOption('cors', true) !== true) {
     fail('setOption(cors) failed');
 }
@@ -77,6 +78,7 @@ if (stripos($defaultOptions, "referrer-policy: strict-origin-when-cross-origin")
 }
 
 $appCustom = new Kislay\Core\App();
+$appCustom->setOption('log', false);
 if ($appCustom->setOption('referrer_policy', 'origin-when-cross-origin') !== true) {
     fail('setOption(referrer_policy) failed');
 }
@@ -95,6 +97,7 @@ if (stripos($customGet, "referrer-policy: origin-when-cross-origin") === false) 
 }
 
 $appDisabled = new Kislay\Core\App();
+$appDisabled->setOption('log', false);
 if ($appDisabled->setOption('referrer_policy', 'off') !== true) {
     fail('setOption(referrer_policy off) failed');
 }

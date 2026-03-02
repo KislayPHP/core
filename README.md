@@ -8,6 +8,12 @@
 
 A high-performance C++ PHP extension providing a compact HTTP/HTTPS server with routing and middleware for building lightweight microservices and APIs. Built on embedded HTTP server with full PHP compatibility and enterprise-grade performance.
 
+## Concurrency Policy
+
+- Core is async/event-driven capable (`listenAsync`, `async()`, `Promise`, `AsyncHttp`).
+- Framework-facing developer flows should remain sync-by-default unless async is explicitly enabled.
+- Persistence/config/metrics/queue modules are intentionally sync-first by default.
+
 ## ⚡ Key Features
 
 - 🚀 **High Performance**: 63K requests/second at 200 concurrency with 0.25ms P95 latency
@@ -105,6 +111,17 @@ Cross-origin note:
 
 Request log format (enable via `$app->setOption('log', true)`):
 - `[kislay] time="YYYY-MM-DD HH:MM:SS.mmm" request="METHOD /path" response="STATUS BYTES" duration_ms=NN error="..."`
+
+Request lifecycle hooks:
+- `$app->onRequestStart(function ($req, $res) { ... });`
+- `$app->onRequestEnd(function ($req, $res) { ... });`
+- Use these to attach internal request-scope runtimes (for example, automatic DB transaction cleanup).
+
+Persistence runtime (optional extension):
+
+```php
+Kislay\Persistence\Runtime::attach($app); // auto begin/cleanup per request
+```
 
 Kislay routing helpers:
 
@@ -398,8 +415,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## 🆘 Support
 
 - 📖 [Documentation](docs.md)
-- 🌐 Full detailed docs: [Skelves Documentation Site](https://skelves.com/docs)
-- 🧪 Local docs view: `http://localhost:5180/docs`
+- 🌐 Full detailed docs: [Skelves Documentation Site](https://skelves.com/kislayphp/docs)
+- 🧪 Local docs view: `http://localhost:5180/kislayphp/docs`
 - 🐛 [Issues](https://github.com/KislayPHP/core/issues)
 - 💬 [Discussions](https://github.com/KislayPHP/core/discussions)
 

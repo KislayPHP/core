@@ -95,6 +95,17 @@ $app->use(callable $middleware): void
 **Parameters:**
 - `$middleware`: Function with signature `function($req, $res, $next)`
 
+##### Request Lifecycle Hooks
+```php
+$app->onRequestStart(callable $hook): void
+$app->onRequestEnd(callable $hook): void
+```
+
+**Parameters:**
+- `$hook`: Function with signature `function($req, $res)`
+
+These hooks are useful for request-scoped runtimes (for example, automatic DB transaction cleanup and request-local cache maintenance).
+
 #### Server Control
 
 ##### Start Server
