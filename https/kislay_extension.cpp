@@ -20,6 +20,8 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <memory>
 
 #include "php_kislay_extension.h"
+#include "Zend/zend_interfaces.h"
+#include <openssl/buffer.h>
 
 #include <civetweb.h>
 #include <algorithm>
@@ -45,6 +47,15 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <cstdio>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// Forward declarations for functions defined later in the file
+static bool kislay_is_controller_handler(zval *handler);
+static bool kislay_normalize_controller_callable(zval *handler, zval *out);
+static bool kislay_jwt_verify_hs256(const std::string &header_b64, const std::string &payload_b64,
+                                     const std::string &sig_b64, const std::string &secret);
+static bool kislay_jwt_parse_payload(const std::string &payload_b64, zval *out);
+static bool kislay_dispatch_to_subapp(zval *subapp_obj, const std::string &method, const std::string &stripped_uri, zval *req_obj, zval *res_obj);
+static void *kislay_run_scheduler(void *arg);
 
 static std::mutex kislay_php_mutex;
 
@@ -1831,6 +1842,10 @@ static bool kislay_handle_route(php_kislay_app_t *app, const std::string &method
     return false;
 }
 
+// Forward declarations
+static bool kislay_is_controller_handler(zval *handler);
+static bool kislay_normalize_controller_callable(zval *handler, zval *out);
+
 // ─── W3C Trace Context helpers ────────────────────────────────────────────────
 
 // Generate cryptographically random hex string of given byte length
@@ -1932,16 +1947,16 @@ static int kislay_begin_request(struct mg_connection *conn) {
             std::string abody;
             bool act_matched = true;
             if (apath == "/actuator/health") {
-                abody = "{"status":"UP","uptime_ms":" + std::to_string(kislay_now_ms() - app->start_time_ms) + "}";
+                abody = "{\"status\":\"UP\",\"uptime_ms\":" + std::to_string(kislay_now_ms() - app->start_time_ms) + "}";
             } else if (apath == "/actuator/ping") {
-                abody = ""pong"";
+                abody = "\"pong\"";
             } else if (apath == "/actuator/info") {
-                abody = std::string("{"php":"") + PHP_VERSION + "","extension":"kislayphp"}";
+                abody = std::string("{\"php\":\"") + PHP_VERSION + "\",\"extension\":\"kislayphp\"}";
             } else if (apath == "/actuator/routes") {
                 abody = "["; bool afirst = true;
                 for (auto &r : app->routes) {
                     if (!afirst) abody += ","; afirst = false;
-                    abody += "{"method":"" + r.method + "","path":"" + r.pattern + ""}";
+                    abody += "{\"method\":\"" + r.method + "\",\"path\":\"" + r.pattern + "\"}";
                 }
                 abody += "]";
             } else if (apath == "/actuator/metrics") {
@@ -2344,7 +2359,8 @@ static int kislay_begin_request(struct mg_connection *conn) {
                 if (had_exception) {
                     if (!app->error_handlers.empty()) {
                         zval exception_copy;
-                        ZVAL_COPY(&exception_copy, EG(exception));
+                        { zval _exc_tmp_zv; ZVAL_OBJ(&_exc_tmp_zv, EG(exception));
+                          ZVAL_COPY(&exception_copy, &_exc_tmp_zv); }
                         zend_clear_exception();
                         for (auto &eh : app->error_handlers) {
                             zval eh_retval;
@@ -2430,6 +2446,10 @@ static int kislay_begin_request(struct mg_connection *conn) {
 }
 
 // ── New feature arginfos ──────────────────────────────────────────────────────
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_kislay_app_on_not_found, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_kislay_app_every, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, interval_ms, IS_LONG, 0)
     ZEND_ARG_CALLABLE_INFO(0, callback, 0)
@@ -3930,7 +3950,7 @@ PHP_METHOD(KislayApp, use) {
         bool is_error_handler = false;
         zval *cb = path_or_callable;
         if (Z_TYPE_P(cb) == IS_OBJECT) {
-            zend_function *efn = zend_hash_str_find_ptr(
+            zend_function *efn = (zend_function *)zend_hash_str_find_ptr(
                 &Z_OBJCE_P(cb)->function_table, "__invoke", sizeof("__invoke") - 1);
             if (efn) is_error_handler = (efn->common.num_args >= 4);
         } else if (Z_TYPE_P(cb) == IS_STRING) {
@@ -5544,11 +5564,11 @@ PHP_METHOD(KislayServiceClient, __construct) {
         obj->base_url = input;
     } else {
         obj->service_name = input;
-        zend_class_entry *discovery_ce = zend_hash_str_find_ptr(CG(class_table), "kislayDiscovery", sizeof("kislayDiscovery") - 1);
+        zend_class_entry *discovery_ce = (zend_class_entry *)zend_hash_str_find_ptr(CG(class_table), "kislayDiscovery", sizeof("kislayDiscovery") - 1);
         if (discovery_ce) {
             zval retval, zname;
             ZVAL_STR(&zname, name_or_url);
-            zend_call_method_with_1_params(nullptr, discovery_ce, nullptr, "resolve", &retval, &zname);
+            zend_call_method(nullptr, discovery_ce, nullptr, "resolve", strlen("resolve"), &retval, 1, &zname, nullptr);
             if (Z_TYPE(retval) == IS_STRING) {
                 obj->base_url = std::string(Z_STRVAL(retval), Z_STRLEN(retval));
             }
@@ -5676,7 +5696,7 @@ PHP_METHOD(KislayServiceClient, fromDiscovery) {
         Z_PARAM_STR(service_name)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_class_entry *discovery_ce = zend_hash_str_find_ptr(CG(class_table),
+    zend_class_entry *discovery_ce = (zend_class_entry *)zend_hash_str_find_ptr(CG(class_table),
         "kislaydiscovery", sizeof("kislaydiscovery") - 1);
     if (!discovery_ce) {
         zend_throw_exception_ex(zend_ce_exception, 0,
@@ -5687,7 +5707,7 @@ PHP_METHOD(KislayServiceClient, fromDiscovery) {
 
     zval retval, zname;
     ZVAL_STR(&zname, service_name);
-    zend_call_method_with_1_params(nullptr, discovery_ce, nullptr, "resolve", &retval, &zname);
+    zend_call_method(nullptr, discovery_ce, nullptr, "resolve", strlen("resolve"), &retval, 1, &zname, nullptr);
     if (Z_TYPE(retval) != IS_STRING) {
         zval_ptr_dtor(&retval);
         zend_throw_exception_ex(zend_ce_exception, 0,
@@ -5897,13 +5917,6 @@ static bool kislay_jwt_parse_payload(const std::string &payload_b64, zval *out) 
     kislay_base64url_decode(payload_b64, decoded);
     ZVAL_NULL(out);
     return php_json_decode_ex(out, decoded.c_str(), (int)decoded.size(), PHP_JSON_OBJECT_AS_ARRAY, 512) == SUCCESS;
-}
-
-// ── Time helper ────────────────────────────────────────────────────────────────
-static long long kislay_now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 // ── Scheduler thread ───────────────────────────────────────────────────────────
