@@ -39,17 +39,17 @@ jobs:
         ./configure
         make -j$(nproc)
 
-    - name: Smoke test (extension loads)
+    - name: Smoke test (extension loads + core classes present)
       run: |
         php -n -d extension=modules/kislayphp_extension.so -r "
-          if (!class_exists('Kislay\\Core\\App')) { exit(1); }
-          if (!class_exists('Kislay\\ServiceClient')) { exit(1); }
+          if (!class_exists('Kislay\\Core\\App')) { fwrite(STDERR, 'FAIL: Kislay\\Core\\App missing\n'); exit(1); }
+          if (!class_exists('Kislay\\ServiceClient')) { fwrite(STDERR, 'FAIL: Kislay\\ServiceClient missing\n'); exit(1); }
           echo 'Extension loaded OK\n';
         "
 
     - name: Run PHP tests
       run: make test TESTS="-q --show-diff"
-      continue-on-error: true   # Tests under active development
+      continue-on-error: true
 
     - name: Upload test results
       if: always()
@@ -100,8 +100,13 @@ jobs:
       continue-on-error: true
 
   windows:
-    name: Build (Windows PHP ${{ matrix.php-version }})
+    # Phase 3 goal: MSVC build via PHP SDK Binary Tools.
+    # The phpsdk-vs17-x64.bat spawns a subshell so commands after CALL
+    # don't inherit the environment. Full Windows support is tracked at:
+    # https://github.com/KislayPHP/core/issues (Phase 3)
+    name: Build (Windows PHP ${{ matrix.php-version }}) [experimental]
     runs-on: windows-latest
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -119,31 +124,32 @@ jobs:
         extensions: mbstring
         tools: composer
 
-    - name: Install Visual C++ Build Tools
+    - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
     - name: Download PHP SDK Binary Tools
       shell: pwsh
       run: |
         git clone --depth=1 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
-        $phpBin = (Get-Command php).Source
-        Write-Host "PHP binary: $phpBin"
 
-    - name: Build extension (Windows MSVC)
-      shell: cmd
+    - name: Build extension via PHP SDK env
+      shell: pwsh
       run: |
-        FOR /F "tokens=*" %%i IN ('php -r "echo PHP_MAJOR_VERSION . PHP_MINOR_VERSION;"') DO SET PHP_VER=%%i
-        FOR /F "tokens=*" %%i IN ('php -r "echo PHP_INT_SIZE == 8 ? 'x64' : 'x86';"') DO SET ARCH=%%i
-        SET SDK=C:\php-sdk
-        CALL %SDK%\phpsdk-vs17-%ARCH%.bat && phpsdk_buildtree phpmaster
-        cd /D %GITHUB_WORKSPACE%
+        $phpArch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
+        $sdkBat  = "C:\php-sdk\phpsdk-vs17-$phpArch.bat"
+        # Write a build script that runs INSIDE the sdk environment
+        $buildScript = @"
+        cd /d ${{ github.workspace }}
         phpize
         configure --enable-kislayphp_extension
         nmake
-
-    - name: Note (Windows tests not yet configured)
-      shell: cmd
-      run: echo Windows build complete - test runner not yet configured for Windows
+        "@
+        $buildScript | Out-File -FilePath C:\build_kislay.bat -Encoding ASCII
+        # The bat spawns a Developer Command Prompt and runs our script
+        $proc = Start-Process -FilePath "cmd.exe" `
+          -ArgumentList "/c `"$sdkBat`" -t `"C:\build_kislay.bat`"" `
+          -Wait -PassThru -NoNewWindow
+        exit $proc.ExitCode
 
   ecosystem:
     name: Ecosystem Validation
