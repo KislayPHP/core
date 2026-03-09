@@ -43,6 +43,10 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <map>
 #include <vector>
 #include <deque>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <condition_variable>
 #include <cstdio>
 #include <sys/stat.h>
