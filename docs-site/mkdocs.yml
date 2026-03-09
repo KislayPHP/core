@@ -1,0 +1,70 @@
+site_name: KislayPHP Documentation
+site_description: High-performance PHP microservices framework — C++ extensions for HTTP, WebSocket, discovery, metrics, and more
+site_url: https://kislayphp.github.io/
+repo_url: https://github.com/KislayPHP
+repo_name: KislayPHP
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quick-start.md
+    - Spring Boot Mapping: getting-started/spring-boot-mapping.md
+  - Extensions:
+    - Core HTTP Server: extensions/core.md
+    - API Gateway: extensions/gateway.md
+    - Service Discovery: extensions/discovery.md
+    - EventBus (WebSocket): extensions/eventbus.md
+    - Message Queue: extensions/queue.md
+    - Metrics & Telemetry: extensions/metrics.md
+    - DB Persistence: extensions/persistence.md
+    - Configuration: extensions/config.md
+  - Advanced:
+    - JWT Security: advanced/jwt.md
+    - Controller Syntax: advanced/controllers.md
+    - Task Scheduler: advanced/scheduler.md
+    - Sub-app Mounting: advanced/subapp.md
+    - Actuator Endpoints: advanced/actuator.md
+    - Service Client: advanced/service-client.md
+    - Windows Support: advanced/windows.md
+  - API Reference:
+    - C++ API (Doxygen): api/index.md
+  - Contributing: contributing.md
