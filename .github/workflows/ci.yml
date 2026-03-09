@@ -74,3 +74,36 @@ jobs:
     - name: Run strict ecosystem workflow
       run: |
         make task-ci
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        php-version: ['8.2', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring
+          tools: phpize
+
+      - name: Install Visual C++ Build Tools
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Download PHP SDK Binary Tools
+        shell: pwsh
+        run: |
+          git clone --depth=1 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
+
+      - name: Build extension (Windows)
+        shell: cmd
+        run: |
+          phpize
+          configure --enable-kislayphp_extension
+          nmake
+
+      - name: Run tests (Windows)
+        shell: cmd
+        run: nmake test
