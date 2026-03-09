@@ -37,6 +37,7 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <map>
 #include <vector>
 #include <deque>
 #include <condition_variable>
@@ -322,6 +323,7 @@ static zend_class_entry *kislay_response_ce;
 static zend_class_entry *kislay_next_ce;
 static zend_class_entry *kislay_async_http_ce;
 static zend_class_entry *kislay_promise_ce;
+static zend_class_entry *kislay_service_client_ce;
 
 ZEND_BEGIN_MODULE_GLOBALS(kislayphp_extension)
     zend_long http_threads;
@@ -640,12 +642,29 @@ typedef struct _php_kislay_async_http_t {
     php_kislay_promise_t *pending_promise;
     zend_object std;
 } php_kislay_async_http_t;
+typedef struct _php_kislay_service_client_t {
+    std::string base_url;
+    std::string service_name;
+    std::map<std::string, std::string> default_headers;
+    long timeout_ms;
+    int retry_count;
+    int retry_delay_ms;
+    pthread_mutex_t lock;
+    zend_object std;   // MUST be last
+} php_kislay_service_client_t;
+
+static inline php_kislay_service_client_t *php_kislay_service_client_from_obj(zend_object *obj) {
+    return reinterpret_cast<php_kislay_service_client_t *>(
+        reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_service_client_t, std));
+}
+
 
 static zend_object_handlers kislay_request_handlers;
 static zend_object_handlers kislay_response_handlers;
 static zend_object_handlers kislay_next_handlers;
 static zend_object_handlers kislay_app_handlers;
 static zend_object_handlers kislay_async_http_handlers;
+static zend_object_handlers kislay_service_client_handlers;
 
 static inline php_kislay_request_t *php_kislay_request_from_obj(zend_object *obj) {
     return reinterpret_cast<php_kislay_request_t *>(
@@ -4185,6 +4204,31 @@ static void kislay_promise_free_obj(zend_object *object) {
     zend_object_std_dtor(&promise->std);
 }
 
+static zend_object *kislay_service_client_create_object(zend_class_entry *ce) {
+    php_kislay_service_client_t *obj = static_cast<php_kislay_service_client_t *>(
+        ecalloc(1, sizeof(php_kislay_service_client_t) + zend_object_properties_size(ce)));
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    new (&obj->base_url) std::string();
+    new (&obj->service_name) std::string();
+    new (&obj->default_headers) std::map<std::string, std::string>();
+    obj->timeout_ms = 5000;
+    obj->retry_count = 0;
+    obj->retry_delay_ms = 100;
+    pthread_mutex_init(&obj->lock, nullptr);
+    obj->std.handlers = &kislay_service_client_handlers;
+    return &obj->std;
+}
+
+static void kislay_service_client_free_obj(zend_object *object) {
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(object);
+    obj->base_url.~basic_string();
+    obj->service_name.~basic_string();
+    obj->default_headers.~map();
+    pthread_mutex_destroy(&obj->lock);
+    zend_object_std_dtor(&obj->std);
+}
+
 static void kislay_promise_resolve(php_kislay_promise_t *promise, zval *value) {
     std::lock_guard<std::mutex> guard(*promise->lock);
     if (promise->state != PromiseState::Pending) return;
@@ -4577,6 +4621,440 @@ PHP_FUNCTION(async) {
     app->task_cv->notify_one();
 }
 
+/* ---- ServiceClient helpers ---- */
+
+static size_t kislay_service_client_write_callback(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    std::string *buf = static_cast<std::string *>(userdata);
+    buf->append(static_cast<char *>(ptr), size * nmemb);
+    return size * nmemb;
+}
+
+static size_t kislay_service_client_header_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
+    std::map<std::string, std::string> *headers = static_cast<std::map<std::string, std::string> *>(userdata);
+    std::string line(buffer, size * nitems);
+    auto colon = line.find(':');
+    if (colon != std::string::npos) {
+        std::string name = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
+        while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ')) value.pop_back();
+        for (auto &c : name) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        (*headers)[name] = value;
+    }
+    return size * nitems;
+}
+
+static std::string kislay_service_client_expand_path(const std::string &path,
+                                                      zval *params_zval,
+                                                      std::string &query_out) {
+    std::string result = path;
+    std::map<std::string, std::string> leftover;
+
+    if (params_zval && Z_TYPE_P(params_zval) == IS_ARRAY) {
+        zend_string *key;
+        zval *val;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(params_zval), key, val) {
+            if (!key) continue;
+            std::string k(ZSTR_VAL(key), ZSTR_LEN(key));
+            std::string placeholder = "{" + k + "}";
+            zval tmp;
+            ZVAL_COPY(&tmp, val);
+            convert_to_string(&tmp);
+            std::string v(Z_STRVAL(tmp), Z_STRLEN(tmp));
+            zval_ptr_dtor(&tmp);
+            auto pos = result.find(placeholder);
+            if (pos != std::string::npos) {
+                result.replace(pos, placeholder.size(), v);
+            } else {
+                leftover[k] = v;
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    if (!leftover.empty()) {
+        std::string qs;
+        for (auto &kv : leftover) {
+            if (!qs.empty()) qs += "&";
+            qs += kv.first + "=" + kv.second;
+        }
+        query_out = qs;
+    }
+    return result;
+}
+
+static bool kislay_service_client_do_request(php_kislay_service_client_t *obj,
+                                              const std::string &method,
+                                              const std::string &url,
+                                              const std::string &body_json,
+                                              long &response_status,
+                                              std::map<std::string, std::string> &response_headers,
+                                              std::string &response_body,
+                                              std::string &error_msg) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        error_msg = "Failed to init curl";
+        return false;
+    }
+
+    struct curl_slist *headers_list = nullptr;
+    pthread_mutex_lock(&obj->lock);
+    for (auto &hdr : obj->default_headers) {
+        std::string h = hdr.first + ": " + hdr.second;
+        headers_list = curl_slist_append(headers_list, h.c_str());
+    }
+    long timeout = obj->timeout_ms;
+    pthread_mutex_unlock(&obj->lock);
+
+    if (method == "POST" || method == "PUT" || method == "PATCH") {
+        headers_list = curl_slist_append(headers_list, "Content-Type: application/json");
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers_list);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, kislay_service_client_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, kislay_service_client_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_headers);
+
+    if (!body_json.empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_json.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_json.size());
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    bool ok = false;
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_status);
+        ok = true;
+    } else {
+        error_msg = std::string("curl error: ") + curl_easy_strerror(res) + " url=" + url;
+    }
+
+    if (headers_list) curl_slist_free_all(headers_list);
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+static void kislay_service_client_request(php_kislay_service_client_t *obj,
+                                           const std::string &method,
+                                           zend_string *path_str,
+                                           zval *params_zval,
+                                           zval *body_zval,
+                                           zval *return_value) {
+    std::string query_str;
+    std::string expanded = kislay_service_client_expand_path(
+        std::string(ZSTR_VAL(path_str), ZSTR_LEN(path_str)),
+        params_zval, query_str);
+
+    pthread_mutex_lock(&obj->lock);
+    std::string base = obj->base_url;
+    int retries = obj->retry_count;
+    int retry_delay = obj->retry_delay_ms;
+    pthread_mutex_unlock(&obj->lock);
+
+    std::string url = base + expanded;
+    if (!query_str.empty()) {
+        url += (url.find('?') == std::string::npos ? "?" : "&") + query_str;
+    }
+
+    std::string body_json;
+    if (body_zval && Z_TYPE_P(body_zval) == IS_ARRAY) {
+        smart_str buf = {nullptr, 0};
+        php_json_encode(&buf, body_zval, 0);
+        smart_str_0(&buf);
+        if (buf.s) {
+            body_json = std::string(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+            smart_str_free(&buf);
+        }
+    }
+
+    long status = 0;
+    std::map<std::string, std::string> resp_headers;
+    std::string resp_body;
+    std::string error_msg;
+
+    bool success = false;
+    for (int attempt = 0; attempt <= retries; attempt++) {
+        resp_headers.clear();
+        resp_body.clear();
+        status = 0;
+        success = kislay_service_client_do_request(obj, method, url, body_json,
+                                                    status, resp_headers, resp_body, error_msg);
+        if (!success) break;
+        if (status < 500) break;
+        if (attempt < retries) {
+#ifndef _WIN32
+            struct timespec ts;
+            ts.tv_sec = retry_delay / 1000;
+            ts.tv_nsec = (retry_delay % 1000) * 1000000L;
+            nanosleep(&ts, nullptr);
+#else
+            Sleep(retry_delay);
+#endif
+        }
+    }
+
+    if (!success) {
+        zend_throw_exception_ex(zend_ce_exception, 0, "ServiceClient request failed: %s", error_msg.c_str());
+        return;
+    }
+
+    array_init(return_value);
+    add_assoc_long(return_value, "status", (zend_long)status);
+    add_assoc_bool(return_value, "ok", status < 400 ? 1 : 0);
+
+    zval headers_zval;
+    array_init(&headers_zval);
+    for (auto &h : resp_headers) {
+        add_assoc_string(&headers_zval, h.first.c_str(), h.second.c_str());
+    }
+    add_assoc_zval(return_value, "headers", &headers_zval);
+
+    zval body_decoded;
+    ZVAL_NULL(&body_decoded);
+    if (!resp_body.empty()) {
+        zend_string *body_zstr = zend_string_init(resp_body.c_str(), resp_body.size(), 0);
+        php_json_decode_ex(&body_decoded, ZSTR_VAL(body_zstr), ZSTR_LEN(body_zstr),
+                           PHP_JSON_OBJECT_AS_ARRAY, 512);
+        zend_string_release(body_zstr);
+        if (Z_TYPE(body_decoded) == IS_NULL) {
+            zval_ptr_dtor(&body_decoded);
+            ZVAL_STRINGL(&body_decoded, resp_body.c_str(), resp_body.size());
+        }
+    }
+    add_assoc_zval(return_value, "body", &body_decoded);
+}
+
+/* ---- ServiceClient arginfos ---- */
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_kislayphp_sc_construct, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, serviceNameOrUrl, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_kislayphp_sc_get, 0, 1, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, params, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_kislayphp_sc_post, 0, 1, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, body, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_kislayphp_sc_with_header, 0, 2, KislayServiceClient, 0)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_kislayphp_sc_with_timeout, 0, 1, KislayServiceClient, 0)
+    ZEND_ARG_TYPE_INFO(0, ms, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_kislayphp_sc_with_retry, 0, 1, KislayServiceClient, 0)
+    ZEND_ARG_TYPE_INFO(0, count, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, delayMs, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_kislayphp_sc_with_base_url, 0, 1, KislayServiceClient, 0)
+    ZEND_ARG_TYPE_INFO(0, url, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_kislayphp_sc_from_discovery, 0, 1, KislayServiceClient, 0)
+    ZEND_ARG_TYPE_INFO(0, serviceName, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+/* ---- ServiceClient PHP_METHODs ---- */
+
+PHP_METHOD(KislayServiceClient, __construct) {
+    zend_string *name_or_url = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name_or_url)
+    ZEND_PARSE_PARAMETERS_END();
+
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    std::string input(ZSTR_VAL(name_or_url), ZSTR_LEN(name_or_url));
+
+    if (input.rfind("http", 0) == 0) {
+        obj->base_url = input;
+    } else {
+        obj->service_name = input;
+        zend_class_entry *discovery_ce = zend_hash_str_find_ptr(CG(class_table), "kislayDiscovery", sizeof("kislayDiscovery") - 1);
+        if (discovery_ce) {
+            zval retval, zname;
+            ZVAL_STR(&zname, name_or_url);
+            zend_call_method_with_1_params(nullptr, discovery_ce, nullptr, "resolve", &retval, &zname);
+            if (Z_TYPE(retval) == IS_STRING) {
+                obj->base_url = std::string(Z_STRVAL(retval), Z_STRLEN(retval));
+            }
+            zval_ptr_dtor(&retval);
+        }
+    }
+}
+
+PHP_METHOD(KislayServiceClient, get) {
+    zend_string *path = nullptr;
+    zval *params = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(params)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    kislay_service_client_request(obj, "GET", path, params, nullptr, return_value);
+}
+
+PHP_METHOD(KislayServiceClient, post) {
+    zend_string *path = nullptr;
+    zval *body = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(body)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    kislay_service_client_request(obj, "POST", path, nullptr, body, return_value);
+}
+
+PHP_METHOD(KislayServiceClient, put) {
+    zend_string *path = nullptr;
+    zval *body = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(body)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    kislay_service_client_request(obj, "PUT", path, nullptr, body, return_value);
+}
+
+PHP_METHOD(KislayServiceClient, delete_) {
+    zend_string *path = nullptr;
+    zval *params = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(params)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    kislay_service_client_request(obj, "DELETE", path, params, nullptr, return_value);
+}
+
+PHP_METHOD(KislayServiceClient, patch) {
+    zend_string *path = nullptr;
+    zval *body = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(path)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY(body)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    kislay_service_client_request(obj, "PATCH", path, nullptr, body, return_value);
+}
+
+PHP_METHOD(KislayServiceClient, withHeader) {
+    zend_string *name = nullptr, *value = nullptr;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_STR(value)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    pthread_mutex_lock(&obj->lock);
+    obj->default_headers[std::string(ZSTR_VAL(name), ZSTR_LEN(name))] =
+        std::string(ZSTR_VAL(value), ZSTR_LEN(value));
+    pthread_mutex_unlock(&obj->lock);
+    RETURN_ZVAL(ZEND_THIS, 1, 0);
+}
+
+PHP_METHOD(KislayServiceClient, withTimeout) {
+    zend_long ms = 5000;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(ms)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    pthread_mutex_lock(&obj->lock);
+    obj->timeout_ms = (long)ms;
+    pthread_mutex_unlock(&obj->lock);
+    RETURN_ZVAL(ZEND_THIS, 1, 0);
+}
+
+PHP_METHOD(KislayServiceClient, withRetry) {
+    zend_long count = 0, delay_ms = 100;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(count)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(delay_ms)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    pthread_mutex_lock(&obj->lock);
+    obj->retry_count = (int)count;
+    obj->retry_delay_ms = (int)delay_ms;
+    pthread_mutex_unlock(&obj->lock);
+    RETURN_ZVAL(ZEND_THIS, 1, 0);
+}
+
+PHP_METHOD(KislayServiceClient, withBaseUrl) {
+    zend_string *url = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(url)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(ZEND_THIS));
+    pthread_mutex_lock(&obj->lock);
+    obj->base_url = std::string(ZSTR_VAL(url), ZSTR_LEN(url));
+    pthread_mutex_unlock(&obj->lock);
+    RETURN_ZVAL(ZEND_THIS, 1, 0);
+}
+
+PHP_METHOD(KislayServiceClient, fromDiscovery) {
+    zend_string *service_name = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(service_name)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zend_class_entry *discovery_ce = zend_hash_str_find_ptr(CG(class_table),
+        "kislaydiscovery", sizeof("kislaydiscovery") - 1);
+    if (!discovery_ce) {
+        zend_throw_exception_ex(zend_ce_exception, 0,
+            "KislayDiscovery extension not loaded; cannot resolve service '%s'",
+            ZSTR_VAL(service_name));
+        return;
+    }
+
+    zval retval, zname;
+    ZVAL_STR(&zname, service_name);
+    zend_call_method_with_1_params(nullptr, discovery_ce, nullptr, "resolve", &retval, &zname);
+    if (Z_TYPE(retval) != IS_STRING) {
+        zval_ptr_dtor(&retval);
+        zend_throw_exception_ex(zend_ce_exception, 0,
+            "KislayDiscovery::resolve() did not return a URL for service '%s'",
+            ZSTR_VAL(service_name));
+        return;
+    }
+
+    object_init_ex(return_value, kislay_service_client_ce);
+    php_kislay_service_client_t *obj = php_kislay_service_client_from_obj(Z_OBJ_P(return_value));
+    obj->service_name = std::string(ZSTR_VAL(service_name), ZSTR_LEN(service_name));
+    obj->base_url = std::string(Z_STRVAL(retval), Z_STRLEN(retval));
+    zval_ptr_dtor(&retval);
+}
+
+static const zend_function_entry kislay_service_client_methods[] = {
+    PHP_ME(KislayServiceClient, __construct, arginfo_kislayphp_sc_construct, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, get, arginfo_kislayphp_sc_get, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, post, arginfo_kislayphp_sc_post, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, put, arginfo_kislayphp_sc_post, ZEND_ACC_PUBLIC)
+    PHP_MALIAS(KislayServiceClient, delete, delete_, arginfo_kislayphp_sc_get, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, patch, arginfo_kislayphp_sc_post, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, withHeader, arginfo_kislayphp_sc_with_header, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, withTimeout, arginfo_kislayphp_sc_with_timeout, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, withRetry, arginfo_kislayphp_sc_with_retry, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, withBaseUrl, arginfo_kislayphp_sc_with_base_url, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayServiceClient, fromDiscovery, arginfo_kislayphp_sc_from_discovery, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    PHP_FE_END
+};
+
 static const zend_function_entry kislay_promise_methods[] = {
     PHP_ME(KislayPromise, then, arginfo_kislay_promise_then, ZEND_ACC_PUBLIC)
     PHP_ME(KislayPromise, catch, arginfo_kislay_promise_catch, ZEND_ACC_PUBLIC)
@@ -4742,6 +5220,13 @@ PHP_MINIT_FUNCTION(kislayphp_extension) {
     std::memcpy(&kislay_promise_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_promise_handlers.offset = XtOffsetOf(php_kislay_promise_t, std);
     kislay_promise_handlers.free_obj = kislay_promise_free_obj;
+
+    INIT_NS_CLASS_ENTRY(ce, "Kislay", "ServiceClient", kislay_service_client_methods);
+    kislay_service_client_ce = zend_register_internal_class(&ce);
+    kislay_service_client_ce->create_object = kislay_service_client_create_object;
+    std::memcpy(&kislay_service_client_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    kislay_service_client_handlers.offset = XtOffsetOf(php_kislay_service_client_t, std);
+    kislay_service_client_handlers.free_obj = kislay_service_client_free_obj;
 
     return SUCCESS;
 }
