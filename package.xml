@@ -16,15 +16,15 @@
   </lead>
   <date>2026-02-28</date>
   <version>
-    <release>0.0.4</release>
-    <api>0.0.4</api>
+    <release>0.0.5</release>
+    <api>0.0.5</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Fixed request context safety by moving active request tracking to thread-local storage, keeping correlation header propagation request-scoped under concurrency.</notes>
+  <notes>Release 0.0.5.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />
