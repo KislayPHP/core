@@ -1,37 +1,34 @@
 # Release Guide
 
-## Recent Releases
+## Current release
 
-### v0.0.2 (2026-02-28)
-- **Multi-threaded Worker Pool**: Added support for true parallel execution on ZTS PHP via `async_threads`.
-- **Sensible Defaults**: Enabled `async`, `log`, and `enable_gc` by default.
-- **Lifecycle Improvements**: Fixed race conditions in `stop()` and improved stability of `listenAsync()`.
-- **Header Policies**: Added default `Referrer-Policy` and improved CORS preflight handling.
-- **Version Alignment**: Synced extension version with PECL and Composer manifests.
+### v0.0.6 (2026-03-21)
+- strict `:param` segment router in the hot path
+- compiled middleware chains with explicit boolean continuation
+- lower-allocation lazy query/body parsing
+- hardened request reset and zval cleanup
+- explicit AsyncHttp self-request guard in single-runtime mode
+- PHPT suite aligned with the current NTS and ZTS runtime contract
 
-### v0.0.1 (2026-02-21)
-- Initial release with basic HTTP/HTTPS server and Promise-based async support.
+### v0.0.5 (2026-02-28)
+- request context safety improvements
+- race-condition fixes around lifecycle operations
 
 ## Pre-publish checks
 
 Run from repository root:
 
 ```bash
-chmod +x scripts/release_check.sh
-./scripts/release_check.sh
-```
-
-## Build extension artifact
-
-```bash
 phpize
-./configure
+./configure --enable-kislayphp_extension
 make -j4
+php run-tests.php -q -n -d extension=modules/kislayphp_extension.so tests
 ```
 
-## Publish checklist
+## Release checklist
 
-- Confirm `README.md`, `composer.json`, and `package.xml` are up to date.
-- Confirm `package.xml` release and API versions are set correctly.
-- Confirm examples pass `php -n -l`.
-- Tag release and push tag to origin.
+- update `php_kislay_extension.h`
+- update `package.xml`
+- update `README.md` and `docs.md`
+- run local benchmarks on `/plaintext`, `/users/:id`, and `/submit/:id`
+- tag and push release

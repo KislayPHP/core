@@ -50,5 +50,6 @@ if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
   CFLAGS="$CFLAGS -DOPENSSL_API_3_0"
   CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0"
 
-  PHP_NEW_EXTENSION(kislayphp_extension, kislay_extension.cpp third_party/civetweb/src/civetweb.c, $ext_shared)
+  PHP_ADD_INCLUDE($srcdir/include)
+  PHP_NEW_EXTENSION(kislayphp_extension, kislay_extension.cpp src/runtime/event_loop.cpp src/runtime/worker_pool.cpp src/runtime/async_bridge.cpp src/runtime/php_runtime.cpp third_party/civetweb/src/civetweb.c, $ext_shared)
 fi

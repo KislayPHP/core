@@ -8,39 +8,7 @@ if (!extension_loaded('kislayphp_extension')) {
 ?>
 --FILE--
 <?php
-function fail($message) {
-    echo "FAIL: {$message}\n";
-    exit(1);
-}
-
-function reserve_free_port() {
-    $socket = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
-    if (!$socket) {
-        fail("Unable to reserve free port: {$errstr}");
-    }
-    $name = stream_socket_get_name($socket, false);
-    fclose($socket);
-    $parts = explode(':', $name);
-    $port = (int) end($parts);
-    if ($port <= 0) {
-        fail('Reserved port is invalid');
-    }
-    return $port;
-}
-
-function make_request($host, $port, $method, $path) {
-    $fp = @fsockopen($host, $port, $errno, $errstr, 2.0);
-    if (!$fp) {
-        fail("Failed to connect: {$errstr}");
-    }
-    $request = "{$method} {$path} HTTP/1.1\r\n";
-    $request .= "Host: {$host}:{$port}\r\n";
-    $request .= "Connection: close\r\n\r\n";
-    fwrite($fp, $request);
-    $response = stream_get_contents($fp);
-    fclose($fp);
-    return $response;
-}
+require __DIR__ . '/server_helper.inc';
 
 $warnings = [];
 set_error_handler(function ($errno, $errstr) use (&$warnings) {
@@ -60,6 +28,7 @@ if ($app->setOption('tls_cert', '/tmp/not-existing-cert.pem') !== true) fail('se
 if ($app->setOption('tls_key', '/tmp/not-existing-key.pem') !== true) fail('setOption(tls_key) failed');
 if ($app->setOption('unknown_option', 'x') !== true) fail('setOption(unknown_option) failed');
 if ($app->setMemoryLimit(-1) !== true) fail('setMemoryLimit failed');
+restore_error_handler();
 
 $joined = implode("\n", $warnings);
 if (strpos($joined, 'invalid num_threads') === false) fail('missing num_threads warning');
@@ -73,23 +42,37 @@ if (strpos($joined, 'setOption(tls_key)') === false) fail('missing tls_key warni
 if (strpos($joined, 'Unsupported option') === false) fail('missing unknown option warning');
 if (strpos($joined, 'setMemoryLimit') === false) fail('missing setMemoryLimit warning');
 
+$host = '127.0.0.1';
+$port = reserve_free_port();
+$bootstrap = <<<'PHP'
+$host = '__HOST__';
+$port = __PORT__;
+$app = new Kislay\Core\App();
+$app->setOption('log', false);
+$app->setOption('num_threads', 0);
+$app->setOption('request_timeout_ms', -100);
+$app->setOption('max_body', -1);
+$app->setOption('cors', 'not-bool');
+$app->setOption('referrer_policy', 'bad-policy');
+$app->setOption('document_root', '/this/path/does/not/exist');
+$app->setOption('tls_cert', '/tmp/not-existing-cert.pem');
+$app->setOption('tls_key', '/tmp/not-existing-key.pem');
 $app->get('/health', function ($req, $res) {
     $res->json(['ok' => true], 200);
 });
+$app->listen($host, $port);
+PHP;
+$bootstrap = strtr($bootstrap, ['__HOST__' => $host, '__PORT__' => (string) $port]);
+$server = start_kislay_server($bootstrap, $host, $port);
 
-$port = reserve_free_port();
-if (!$app->listenAsync('127.0.0.1', $port)) {
-    fail('listenAsync failed');
+try {
+    $response = make_request($host, $port, 'GET', '/health');
+} finally {
+    stop_kislay_server($server);
 }
-usleep(150000);
-$response = make_request('127.0.0.1', $port, 'GET', '/health');
-$app->stop();
-restore_error_handler();
 
 $statusLine = strtok($response, "\r\n");
-if ($statusLine === false || strpos($statusLine, '200') === false) {
-    fail("Expected 200 response, got: {$statusLine}");
-}
+if ($statusLine === false || strpos($statusLine, '200') === false) fail("Expected 200 response, got: {$statusLine}");
 
 echo "OK\n";
 ?>
