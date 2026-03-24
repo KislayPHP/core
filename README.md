@@ -9,7 +9,7 @@ Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the emb
 ## Install
 
 ```bash
-pie install kislayphp/core:0.0.6
+pie install kislayphp/core
 ```
 
 ```ini
