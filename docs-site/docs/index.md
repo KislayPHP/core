@@ -64,3 +64,18 @@ php server.php
 - [Installation](getting-started/installation.md) — get all extensions installed
 - [Quick Start](getting-started/quick-start.md) — routes, middleware, JSON responses
 - [Spring Boot Mapping](getting-started/spring-boot-mapping.md) — familiar Spring concepts mapped to PHP
+- [Performance & Benchmarks](advanced/performance.md) — v0.0.7 benchmark results vs Fastify, Go, Spring Boot
+
+---
+
+## Performance Highlights (v0.0.7)
+
+| Scenario | KislayPHP | vs Fastify | vs Go |
+|---|---|---|---|
+| Route matching | **17,496 req/s** | +2.4× | +16× |
+| JSON (small) | **17,918 req/s** | +1.7× | +3.6× |
+| JSON (100 KB) | **13,134 req/s** | +1.7× | +1.1× |
+| Plaintext | **16,375 req/s** | +1.0× | — |
+
+All measurements: 10,000 req · c=100 · localhost · Apple Silicon · PHP 8.5.2 NTS.
+→ See [full benchmark report](advanced/performance.md).

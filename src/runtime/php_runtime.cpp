@@ -1,5 +1,6 @@
 #include "kislay/runtime/php_runtime.h"
 
+
 namespace kislay::runtime {
 
 void RequestCompletion::complete(RuntimeResponseMessage response) {
@@ -27,16 +28,22 @@ PhpRuntimePool::PhpRuntimePool(PhpRuntimeConfig config, RuntimeRequestHandler ha
     : config_(std::move(config))
     , handler_(std::move(handler))
     , request_queue_(config_.request_queue_size) {
-    if (config_.parallel_enabled && config_.is_zts) {
-        mode_ = PhpRuntimeMode::ZtsParallel;
+    if (config_.parallel_enabled) {
+        if (config_.is_zts) {
+            mode_ = PhpRuntimeMode::ZtsParallel;
+            runtime_threads_ = config_.runtime_threads == 0 ? 1 : config_.runtime_threads;
+        } else {
+            // NTS must use a single dedicated background thread for safe PHP execution
+            mode_ = PhpRuntimeMode::DedicatedThreadLoop;
+            runtime_threads_ = 1;
+        }
     } else if (config_.background_thread && config_.is_zts) {
         mode_ = PhpRuntimeMode::DedicatedThreadLoop;
+        runtime_threads_ = 1;
     } else {
         mode_ = PhpRuntimeMode::SingleThreadLoop;
+        runtime_threads_ = 1;
     }
-    runtime_threads_ = mode_ == PhpRuntimeMode::ZtsParallel
-        ? (config_.runtime_threads == 0 ? 1 : config_.runtime_threads)
-        : 1;
 }
 
 PhpRuntimePool::~PhpRuntimePool() {
@@ -51,7 +58,7 @@ bool PhpRuntimePool::start() {
     if (mode_ != PhpRuntimeMode::SingleThreadLoop) {
         runtime_threads_storage_.reserve(runtime_threads_);
         for (std::size_t i = 0; i < runtime_threads_; ++i) {
-            runtime_threads_storage_.emplace_back([this, i]() { worker_main(i); });
+            runtime_threads_storage_.emplace_back([this, i]() { supervisor_main(i); });
         }
     }
 
@@ -91,6 +98,7 @@ std::size_t PhpRuntimePool::drain(std::size_t budget) {
         return 0;
     }
 
+    static std::mutex nts_lock;
     std::size_t processed = 0;
     while (processed < budget) {
         RuntimeRequestMessage request;
@@ -101,7 +109,12 @@ std::size_t PhpRuntimePool::drain(std::size_t budget) {
         RuntimeResponseMessage response;
         response.task_id = request.task_id;
         if (handler_) {
-            handler_(0, request, response);
+            if (!config_.is_zts) {
+                std::lock_guard<std::mutex> lock(nts_lock);
+                handler_(0, request, response);
+            } else {
+                handler_(0, request, response);
+            }
         } else {
             response.status_code = 500;
             response.body = "PHP runtime handler is not configured";
@@ -134,6 +147,8 @@ bool PhpRuntimePool::has_pending_requests() const {
 }
 
 void PhpRuntimePool::worker_main(std::size_t runtime_index) {
+    static std::mutex nts_lock;
+    std::uint32_t request_count = 0;
     while (running_.load(std::memory_order_acquire)) {
         RuntimeRequestMessage request;
         if (!request_queue_.wait_pop_for(request, std::chrono::milliseconds(100))) {
@@ -143,7 +158,12 @@ void PhpRuntimePool::worker_main(std::size_t runtime_index) {
         RuntimeResponseMessage response;
         response.task_id = request.task_id;
         if (handler_) {
-            handler_(runtime_index, request, response);
+            if (!config_.is_zts) {
+                std::lock_guard<std::mutex> lock(nts_lock);
+                handler_(runtime_index, request, response);
+            } else {
+                handler_(runtime_index, request, response);
+            }
         } else {
             response.status_code = 500;
             response.body = "PHP runtime handler is not configured";
@@ -151,6 +171,20 @@ void PhpRuntimePool::worker_main(std::size_t runtime_index) {
         }
         if (request.completion) {
             request.completion->complete(std::move(response));
+        }
+
+        if (config_.max_requests > 0 && ++request_count >= config_.max_requests) {
+            break;
+        }
+    }
+}
+
+void PhpRuntimePool::supervisor_main(std::size_t runtime_index) {
+    while (running_.load(std::memory_order_acquire)) {
+        worker_main(runtime_index);
+        // Small sleep to prevent tight loop if worker_main exits immediately
+        if (running_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 }

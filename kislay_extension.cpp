@@ -46,9 +46,11 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <cstdio>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "kislay/runtime/async_bridge.h"
 #include "kislay/runtime/php_runtime.h"
+#include "kislay/runtime/uv_server.h"
 
 typedef struct _php_kislay_app_t php_kislay_app_t;
 typedef struct _php_kislay_async_http_t php_kislay_async_http_t;
@@ -243,6 +245,7 @@ struct Route {
     std::string pattern;
     std::vector<Segment> segments;
     std::vector<std::string> param_names;
+    std::unordered_map<std::string, std::size_t> param_index_map;
     std::vector<zval> middleware;
     std::vector<zval> compiled_middleware;
     zval handler;
@@ -272,7 +275,8 @@ struct KislayPHPSession {
             active = true;
         }
 #else
-        ZEND_ASSERT(app != nullptr);
+        // In NTS, the request is already started by the CLI SAPI.
+        // We just mark it as active to ensure we don't nest start/shutdown calls.
         active = true;
 #endif
         if (active) {
@@ -281,11 +285,11 @@ struct KislayPHPSession {
     }
 
     ~KislayPHPSession() {
-        if (active) {
 #if defined(ZTS)
+        if (active) {
             php_request_shutdown(nullptr);
-#endif
         }
+#endif
         kislay_php_thread_active = previous_state;
     }
 
@@ -331,11 +335,13 @@ typedef struct _php_kislay_request_t {
     std::string span_id;     // 16 hex chars (new span for this request)
     std::string traceparent; // full "00-{traceId}-{spanId}-01"
     std::string tracestate;  // forwarded tracestate header value
+    const kislay::Route *matched_route{nullptr};
     zend_object std;
 } php_kislay_request_t;
 
 typedef struct _php_kislay_response_t {
     std::string body;
+    zend_string *body_zstr; // Option 4: direct zend_string* to avoid copy from smart_str
     std::string file_path;
     std::string content_type;
     std::unordered_map<std::string, std::string> headers;
@@ -360,11 +366,17 @@ typedef struct _php_kislay_app_t {
     std::unordered_map<std::string, std::unordered_map<std::size_t, std::vector<size_t>>> segmented_routes_by_method;
     std::unique_ptr<std::mutex> lock;
     struct mg_context *ctx;
+    std::unique_ptr<kislay::runtime::UvServer> uv_server;
+    std::string server_type; // "civetweb" or "libuv"
     std::atomic_bool running;
     size_t memory_limit_bytes;
     bool gc_after_request;
     int thread_count;
+    int worker_count;
     zend_long read_timeout_ms;
+    zend_long keep_alive_timeout_ms;
+    bool enable_keep_alive;
+    std::size_t queue_size;
     size_t max_body_bytes;
     bool cors_enabled;
     bool log_enabled;
@@ -402,6 +414,7 @@ typedef struct _php_kislay_app_t {
     long long start_time_ms;
     std::uint64_t gc_request_counter;
     std::uint32_t gc_interval_requests;
+    std::uint32_t max_requests; // Max requests per worker before recycling
 
     // Task Scheduler
     std::vector<kislay_scheduled_task> scheduled_tasks;
@@ -594,6 +607,12 @@ static std::atomic<php_kislay_app_t *> kislay_active_app{nullptr};
 // Request context must stay thread-local to avoid cross-thread pointer reuse.
 static thread_local php_kislay_request_t *kislay_active_request = nullptr;
 static std::atomic_bool kislay_signal_stop_requested{false};
+
+// Global hook for other extensions (like persistence) to clean up before request shutdown
+extern "C" {
+    void (*kislay_request_end_observer)() = nullptr;
+}
+
 static std::atomic_bool kislay_signal_handlers_installed{false};
 
 static int kislay_begin_request(struct mg_connection *conn);
@@ -608,6 +627,8 @@ static bool kislay_async_has_pending_for_request(php_kislay_app_t *app, const st
 static void kislay_async_wait_for_request(php_kislay_app_t *app, const std::string &request_id, zend_long timeout_ms);
 static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_loop);
 static void kislay_app_stop_runtime(php_kislay_app_t *app);
+static bool kislay_app_start_server_uv(php_kislay_app_t *app, const std::string &listen_addr);
+static void kislay_app_stop_server_uv(php_kislay_app_t *app);
 static void kislay_process_runtime_request(std::size_t runtime_lane,
                                            php_kislay_app_t *app,
                                            kislay::runtime::RuntimeRequestMessage &request,
@@ -625,6 +646,7 @@ static void kislay_app_stop_server(php_kislay_app_t *app) {
         mg_stop(app->ctx);
         app->ctx = nullptr;
     }
+    kislay_app_stop_server_uv(app);
     app->running.store(false, std::memory_order_relaxed);
 
     if (app->loop_active.load(std::memory_order_relaxed)) {
@@ -645,58 +667,6 @@ static void kislay_app_stop_server(php_kislay_app_t *app) {
     kislay_signal_stop_requested.store(false, std::memory_order_relaxed);
 }
 
-static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_loop) {
-    if (app == nullptr) {
-        return false;
-    }
-    if (app->php_runtime_pool && app->php_runtime_pool->running()) {
-        return true;
-    }
-
-    const bool parallel_requested = app->zts_parallel_enabled;
-    if (!app->is_zts_runtime && parallel_requested) {
-        php_error_docref(nullptr, E_WARNING,
-                         "KISLAY_ENABLE_ZTS_PARALLEL=1 requires a ZTS PHP build");
-        return false;
-    }
-    if (!require_wait_loop && !app->is_zts_runtime) {
-        php_error_docref(nullptr, E_WARNING,
-                         "KislayApp::listenAsync requires ZTS; NTS uses a main-thread PHP runtime lane");
-        return false;
-    }
-
-    bool enable_parallel = parallel_requested;
-    if (enable_parallel && app->async_enabled) {
-        php_error_docref(nullptr, E_WARNING,
-                         "KISLAY_ENABLE_ZTS_PARALLEL=1 is incompatible with kislay async helpers; using single PHP runtime lane");
-        enable_parallel = false;
-    }
-    const bool dedicated_background_thread = !require_wait_loop && app->is_zts_runtime && !enable_parallel;
-
-    const std::size_t runtime_threads = enable_parallel
-        ? static_cast<std::size_t>(std::max(app->thread_count, 1))
-        : 1;
-
-    kislay::runtime::PhpRuntimeConfig config;
-    config.is_zts = app->is_zts_runtime;
-    config.parallel_enabled = enable_parallel;
-    config.background_thread = dedicated_background_thread;
-    config.runtime_threads = runtime_threads;
-    config.request_queue_size = 2048;
-
-    app->php_runtime_threads = runtime_threads;
-    app->php_runtime_pool.reset(new kislay::runtime::PhpRuntimePool(
-        config,
-        [app](std::size_t runtime_lane,
-              kislay::runtime::RuntimeRequestMessage &request,
-              kislay::runtime::RuntimeResponseMessage &response) {
-            kislay_process_runtime_request(runtime_lane, app, request, response);
-        }
-    ));
-
-    return app->php_runtime_pool->start();
-}
-
 static void kislay_app_stop_runtime(php_kislay_app_t *app) {
     if (app != nullptr && app->php_runtime_pool) {
         app->php_runtime_pool->stop();
@@ -715,7 +685,7 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
             kislay_app_stop_server(app);
             break;
         }
-        if (timeout_ms >= 0) {
+        if (timeout_ms > 0) {
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
             if (elapsed >= timeout_ms) {
@@ -724,9 +694,6 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
         }
         if (app->php_runtime_pool &&
             app->php_runtime_pool->mode() == kislay::runtime::PhpRuntimeMode::SingleThreadLoop) {
-            if (app->php_runtime_pool->has_pending_requests()) {
-                continue;
-            }
             app->php_runtime_pool->wait_for_activity_for(std::chrono::milliseconds(1));
         } else if (app->async_bridge && app->async_bridge->running()) {
             app->async_bridge->wait_for_activity_for(std::chrono::milliseconds(1));
@@ -734,12 +701,64 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    if (app->php_runtime_pool &&
-        app->php_runtime_pool->mode() == kislay::runtime::PhpRuntimeMode::SingleThreadLoop) {
-        app->php_runtime_pool->drain(512);
-    }
-    kislay_async_drain(app, 512);
     return true;
+}
+
+static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_loop) {
+    if (app == nullptr) {
+        return false;
+    }
+    if (app->php_runtime_pool && app->php_runtime_pool->running()) {
+        return true;
+    }
+
+    const bool parallel_requested = app->zts_parallel_enabled;
+    bool enable_parallel = parallel_requested;
+    if (enable_parallel && app->async_enabled) {
+        php_error_docref(nullptr, E_WARNING,
+                         "KISLAY_ENABLE_ZTS_PARALLEL=1 is incompatible with kislay async helpers; using single PHP runtime lane");
+        enable_parallel = false;
+    }
+    const bool dedicated_background_thread = !require_wait_loop && !enable_parallel;
+
+    const std::size_t runtime_threads = enable_parallel
+        ? static_cast<std::size_t>(std::max(app->thread_count, 1))
+        : 1;
+
+    kislay::runtime::PhpRuntimeConfig config;
+    config.is_zts = app->is_zts_runtime;
+    config.parallel_enabled = enable_parallel;
+    config.background_thread = dedicated_background_thread;
+    config.runtime_threads = runtime_threads;
+    config.request_queue_size = app->queue_size;
+    config.max_requests = app->max_requests;
+
+    app->php_runtime_threads = runtime_threads;
+    app->php_runtime_pool.reset(new kislay::runtime::PhpRuntimePool(
+        config,
+        [app](std::size_t runtime_lane,
+              kislay::runtime::RuntimeRequestMessage &request,
+              kislay::runtime::RuntimeResponseMessage &response) {
+            kislay_process_runtime_request(runtime_lane, app, request, response);
+        }
+    ));
+
+    if (app->async_enabled) {
+        if (!app->async_bridge) {
+            app->async_bridge.reset(new kislay::runtime::AsyncBridge());
+        }
+        if (!app->async_bridge->running()) {
+            app->async_bridge->start(static_cast<std::size_t>(std::max(app->async_worker_count, 1)));
+        }
+        app->loop_active.store(true, std::memory_order_relaxed);
+    }
+
+    app->running.store(true, std::memory_order_relaxed);
+    bool ok = app->php_runtime_pool->start();
+    if (ok && require_wait_loop) {
+        kislay_app_wait_loop(app, -1);
+    }
+    return ok;
 }
 
 static void kislay_disable_stack_guard_for_nts(const char *source) {
@@ -869,6 +888,29 @@ static void kislay_sanitize_tls_paths(std::string *cert_path, std::string *key_p
     }
 }
 
+static bool kislay_app_start_server_uv(php_kislay_app_t *app, const std::string &listen_addr) {
+    std::string host = "0.0.0.0";
+    int port = 8080;
+    
+    size_t colon = listen_addr.find(':');
+    if (colon != std::string::npos) {
+        host = listen_addr.substr(0, colon);
+        port = std::stoi(listen_addr.substr(colon + 1));
+    } else {
+        port = std::stoi(listen_addr);
+    }
+
+    app->uv_server.reset(new kislay::runtime::UvServer(host, port, app->php_runtime_pool));
+    return app->uv_server->start();
+}
+
+static void kislay_app_stop_server_uv(php_kislay_app_t *app) {
+    if (app->uv_server) {
+        app->uv_server->stop();
+        app->uv_server.reset();
+    }
+}
+
 static bool kislay_app_start_server(php_kislay_app_t *app,
                                     const std::string &listen_addr,
                                     const std::string &cert_path,
@@ -897,6 +939,13 @@ static bool kislay_app_start_server(php_kislay_app_t *app,
     if (!key_path.empty()) {
         option_values.push_back("ssl_private_key");
         option_values.push_back(key_path);
+    }
+
+    option_values.push_back("enable_keep_alive");
+    option_values.push_back(app->enable_keep_alive ? "yes" : "no");
+    if (app->enable_keep_alive && app->keep_alive_timeout_ms > 0) {
+        option_values.push_back("keep_alive_timeout_ms");
+        option_values.push_back(std::to_string(app->keep_alive_timeout_ms));
     }
 
     std::vector<const char *> options;
@@ -1072,6 +1121,7 @@ static zend_object *kislay_response_create_object(zend_class_entry *ce) {
     new (&res->file_path) std::string();
     new (&res->content_type) std::string();
     new (&res->headers) std::unordered_map<std::string, std::string>();
+    res->body_zstr = nullptr;
     res->send_file = false;
     res->status_code = 200;
     res->std.handlers = &kislay_response_handlers;
@@ -1080,6 +1130,10 @@ static zend_object *kislay_response_create_object(zend_class_entry *ce) {
 
 static void kislay_response_free_obj(zend_object *object) {
     php_kislay_response_t *res = php_kislay_response_from_obj(object);
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
     res->headers.~unordered_map();
     res->content_type.~basic_string();
     res->file_path.~basic_string();
@@ -1102,6 +1156,8 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     new (&app->segmented_routes_by_method) std::unordered_map<std::string, std::unordered_map<std::size_t, std::vector<size_t>>>();
     new (&app->lock) std::unique_ptr<std::mutex>(new std::mutex());
     app->ctx = nullptr;
+    new (&app->uv_server) std::unique_ptr<kislay::runtime::UvServer>();
+    new (&app->server_type) std::string("civetweb");
     app->running.store(false, std::memory_order_relaxed);
     app->memory_limit_bytes = 0;
     app->gc_after_request = kislay_env_bool("KISLAYPHP_HTTP_ENABLE_GC", KISLAYPHP_EXTENSION_G(gc_enabled) != 0);
@@ -1110,11 +1166,16 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
         KISLAYPHP_EXTENSION_G(http_threads),
         "Kislay\\Core\\App::__construct"
     );
+    app->worker_count = kislay_env_long("KISLAYPHP_WORKERS", 1);
+    if (app->worker_count < 1) app->worker_count = 1;
     app->read_timeout_ms = kislay_sanitize_timeout_ms(
         kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms)),
         KISLAYPHP_EXTENSION_G(read_timeout_ms),
         "Kislay\\Core\\App::__construct"
     );
+    app->enable_keep_alive = true;
+    app->keep_alive_timeout_ms = 500; // Default 500ms for high-concurrency reuse
+    app->queue_size = 2048;
     zend_long max_body = kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body));
     app->max_body_bytes = kislay_sanitize_max_body(
         max_body,
@@ -1180,6 +1241,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     }
     app->gc_request_counter = 0;
     app->gc_interval_requests = 1000;
+    app->max_requests = 0; // 0 means disabled
     new (&app->scheduled_tasks) std::vector<kislay_scheduled_task>();
     new (&app->scheduler_lock) std::unique_ptr<std::mutex>(new std::mutex());
     new (&app->scheduler_thread) std::unique_ptr<std::thread>();
@@ -1261,6 +1323,8 @@ static void kislay_app_free_obj(zend_object *object) {
     app->default_tls_cert.~basic_string();
     app->default_tls_key.~basic_string();
     app->referrer_policy.~basic_string();
+    app->server_type.~basic_string();
+    app->uv_server.~unique_ptr();
     app->lock.~unique_ptr();
     // New features cleanup
     app->scheduler_running.store(false, std::memory_order_relaxed);
@@ -1892,6 +1956,10 @@ static bool kislay_build_route(const std::string &pattern, kislay::Route *route,
     }
 
     route->exact = route->param_names.empty();
+    route->param_index_map.clear();
+    for (std::size_t i = 0; i < route->param_names.size(); ++i) {
+        route->param_index_map[route->param_names[i]] = i;
+    }
     return true;
 }
 
@@ -1983,6 +2051,23 @@ static void kislay_request_reset_state(php_kislay_request_t *req) {
     req->span_id.clear();
     req->traceparent.clear();
     req->tracestate.clear();
+    req->matched_route = nullptr;
+}
+
+static void kislay_response_reset_state(php_kislay_response_t *res) {
+    if (res == nullptr) {
+        return;
+    }
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
+    res->body.clear();
+    res->file_path.clear();
+    res->content_type.clear();
+    res->headers.clear();
+    res->send_file = false;
+    res->status_code = 200;
 }
 
 static void kislay_request_clone_for_subapp(php_kislay_request_t *dst,
@@ -2037,6 +2122,11 @@ static bool kislay_is_callable(zval *callable) {
 }
 
 static void kislay_response_set_body(php_kislay_response_t *res, const char *data, size_t len) {
+    // Release any previously stolen zend_string before overwriting body
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
     res->send_file = false;
     res->file_path.clear();
     res->headers.erase("content-length");
@@ -2077,10 +2167,23 @@ static void kislay_send_response(struct mg_connection *conn,
         status_code = 500;
     }
     const char *status_text = kislay_status_text(status_code);
-    const std::string &body = res->body;
+    // Option 4: prefer body_zstr (direct zend_string pointer) over the copied std::string
+    const char *body_ptr;
+    std::size_t body_len;
+    if (res->body_zstr != nullptr) {
+        body_ptr = ZSTR_VAL(res->body_zstr);
+        body_len = ZSTR_LEN(res->body_zstr);
+    } else {
+        body_ptr = res->body.c_str();
+        body_len = res->body.size();
+    }
     const bool stream_file = res->send_file && !res->file_path.empty();
     std::string content_type = res->content_type.empty() ? "text/plain" : res->content_type;
-    std::string content_length = std::to_string(body.size());
+    // Option minor: stack-allocated Content-Length to avoid std::to_string heap alloc
+    char cl_buf[24];
+    snprintf(cl_buf, sizeof(cl_buf), "%zu", body_len);
+    const char *content_length = cl_buf;
+    std::string cl_override;
     auto header_cl = res->headers.find("content-length");
     auto header_ct = res->headers.find("content-type");
     if (header_ct != res->headers.end()) {
@@ -2089,21 +2192,22 @@ static void kislay_send_response(struct mg_connection *conn,
     if (stream_file && (header_cl == res->headers.end() || header_cl->second.empty())) {
         struct stat file_stat;
         if (stat(res->file_path.c_str(), &file_stat) == 0 && file_stat.st_size >= 0) {
-            content_length = std::to_string(static_cast<size_t>(file_stat.st_size));
+            snprintf(cl_buf, sizeof(cl_buf), "%zu", static_cast<size_t>(file_stat.st_size));
         }
     }
     if (header_cl != res->headers.end() && !header_cl->second.empty()) {
-        content_length = header_cl->second;
+        cl_override = header_cl->second;
+        content_length = cl_override.c_str();
     }
     mg_printf(conn,
               "HTTP/1.1 %lld %s\r\n"
               "Content-Type: %s\r\n"
               "Content-Length: %s\r\n"
-              "Connection: close\r\n",
+              "Connection: keep-alive\r\n",
               static_cast<long long>(status_code),
               status_text,
               content_type.c_str(),
-              content_length.c_str());
+              content_length);
 
     kislay_write_cors_headers(conn, cors_enabled);
     kislay_write_referrer_policy_header(conn, res, referrer_policy);
@@ -2134,8 +2238,8 @@ static void kislay_send_response(struct mg_connection *conn,
     mg_printf(conn, "\r\n");
     if (stream_file) {
         mg_send_file_body(conn, res->file_path.c_str());
-    } else if (!body.empty()) {
-        mg_write(conn, body.c_str(), body.size());
+    } else if (body_len > 0) {
+        mg_write(conn, body_ptr, body_len);
     }
 }
 
@@ -2152,31 +2256,47 @@ static void kislay_send_marshaled_response(struct mg_connection *conn,
     const char *status_text = kislay_status_text(status_code);
     const bool stream_file = response.send_file && !response.file_path.empty();
     std::string content_type = response.content_type.empty() ? "text/plain" : response.content_type;
-    std::string content_length = std::to_string(response.body.size());
     auto header_cl = response.headers.find("content-length");
     auto header_ct = response.headers.find("content-type");
     if (header_ct != response.headers.end()) {
         content_type = header_ct->second;
     }
+
+    // Option 1: use raw_ptr when available (zero-copy from pre-filled body buffer),
+    // otherwise fall back to body.c_str().
+    const char *body_ptr = response.send_raw_buffer && response.raw_ptr
+        ? response.raw_ptr
+        : response.body.c_str();
+    const std::size_t body_len = response.send_raw_buffer && response.raw_ptr
+        ? response.raw_len
+        : response.body.size();
+
+    // Option minor: stack Content-Length to avoid per-response heap alloc
+    char cl_buf[24];
+    snprintf(cl_buf, sizeof(cl_buf), "%zu", body_len);
+    const char *content_length = cl_buf;
+    std::string cl_override;
+
     if (stream_file && (header_cl == response.headers.end() || header_cl->second.empty())) {
         struct stat file_stat;
         if (stat(response.file_path.c_str(), &file_stat) == 0 && file_stat.st_size >= 0) {
-            content_length = std::to_string(static_cast<size_t>(file_stat.st_size));
+            snprintf(cl_buf, sizeof(cl_buf), "%zu", static_cast<size_t>(file_stat.st_size));
         }
     }
     if (header_cl != response.headers.end() && !header_cl->second.empty()) {
-        content_length = header_cl->second;
+        cl_override = header_cl->second;
+        content_length = cl_override.c_str();
     }
 
     mg_printf(conn,
               "HTTP/1.1 %lld %s\r\n"
               "Content-Type: %s\r\n"
               "Content-Length: %s\r\n"
-              "Connection: close\r\n",
+              "Connection: keep-alive\r\n",
               static_cast<long long>(status_code),
               status_text,
               content_type.c_str(),
-              content_length.c_str());
+              content_length);
 
     kislay_write_cors_headers(conn, cors_enabled);
     if (!referrer_policy.empty() && response.headers.find("referrer-policy") == response.headers.end()) {
@@ -2202,8 +2322,8 @@ static void kislay_send_marshaled_response(struct mg_connection *conn,
     mg_printf(conn, "\r\n");
     if (stream_file) {
         mg_send_file_body(conn, response.file_path.c_str());
-    } else if (!response.body.empty()) {
-        mg_write(conn, response.body.c_str(), response.body.size());
+    } else if (body_len > 0) {
+        mg_write(conn, body_ptr, body_len);
     }
 }
 
@@ -2243,29 +2363,53 @@ static std::string kislay_exception_debug_string() {
         return "";
     }
     zend_object *exception = EG(exception);
+    
+    // Temporarily clear exception to safely use Zend APIs
+    zend_object *old_exception = EG(exception);
+    EG(exception) = nullptr;
+    
     std::string class_name = exception->ce != nullptr ? std::string(ZSTR_VAL(exception->ce->name)) : "Exception";
     zval rv;
     zval *msg = zend_read_property(exception->ce, exception, ZEND_STRL("message"), 1, &rv);
     std::string out = class_name;
     if (msg != nullptr && Z_TYPE_P(msg) == IS_STRING && Z_STRLEN_P(msg) > 0) {
-        out += ": " + std::string(Z_STRVAL_P(msg), Z_STRLEN_P(msg));
+        out += ": " + std::string(Z_STRVAL_P(msg), ZSTR_LEN(Z_STR_P(msg)));
     }
     zval rv_file;
     zval *file = zend_read_property(exception->ce, exception, ZEND_STRL("file"), 1, &rv_file);
     zval rv_line;
     zval *line = zend_read_property(exception->ce, exception, ZEND_STRL("line"), 1, &rv_line);
     if (file != nullptr && Z_TYPE_P(file) == IS_STRING && line != nullptr && Z_TYPE_P(line) == IS_LONG) {
-        out += " @ ";
-        out += std::string(Z_STRVAL_P(file), Z_STRLEN_P(file));
-        out += ":";
-        out += std::to_string(static_cast<long long>(Z_LVAL_P(line)));
+        out += " @ " + std::string(Z_STRVAL_P(file), ZSTR_LEN(Z_STR_P(file))) + ":" + std::to_string(static_cast<long long>(Z_LVAL_P(line)));
     }
+    
+    // Restore exception
+    EG(exception) = old_exception;
     return out;
 }
 
 static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *retval, std::string *error_out) {
     ZVAL_UNDEF(retval);
-    if (call_user_function(EG(function_table), nullptr, callable, retval, argc, argv) == FAILURE) {
+    int result = FAILURE;
+    bool bailed_out = false;
+    
+    zend_try {
+        result = call_user_function(EG(function_table), nullptr, callable, retval, argc, argv);
+    } zend_catch {
+        bailed_out = true;
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+    } zend_end_try();
+    
+    if (bailed_out) {
+        if (error_out != nullptr) {
+            *error_out = "engine bailout during call to " + kislay_callable_debug_name(callable);
+        }
+        return false;
+    }
+    
+    if (result == FAILURE) {
         if (error_out != nullptr) {
             *error_out = "call_user_function failed for callable " + kislay_callable_debug_name(callable);
             std::string exception_text = kislay_exception_debug_string();
@@ -2279,6 +2423,7 @@ static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *ret
         if (error_out != nullptr) {
             *error_out = "exception in callable " + kislay_callable_debug_name(callable) + " (" + kislay_exception_debug_string() + ")";
         }
+        return false;
     }
     return true;
 }
@@ -2455,12 +2600,35 @@ static kislay::Route *kislay_find_route(php_kislay_app_t *app,
                                         const std::string &path,
                                         const std::vector<std::string_view> &path_segments,
                                         php_kislay_request_t *req) {
+    req->matched_route = nullptr;
+    
+    if (app->log_enabled) {
+        std::fprintf(stderr, "[kislay-debug] Finding route for Method: %s, Path: %s (Segments: %zu)\n", 
+                     method.c_str(), path.c_str(), path_segments.size());
+    }
+
     auto method_exact_it = app->exact_routes_by_method.find(method);
     if (method_exact_it != app->exact_routes_by_method.end()) {
         auto uri_exact_it = method_exact_it->second.find(path);
         if (uri_exact_it != method_exact_it->second.end() && uri_exact_it->second < app->routes.size()) {
+            if (app->log_enabled) std::fprintf(stderr, "[kislay-debug] Found exact match at index %zu\n", uri_exact_it->second);
             req->params.clear();
-            return &app->routes[uri_exact_it->second];
+            req->matched_route = &app->routes[uri_exact_it->second];
+            return const_cast<kislay::Route *>(req->matched_route);
+        }
+    }
+
+    // Fallback: HEAD can match GET
+    if (method == "HEAD") {
+        auto get_exact_it = app->exact_routes_by_method.find("GET");
+        if (get_exact_it != app->exact_routes_by_method.end()) {
+            auto uri_exact_it = get_exact_it->second.find(path);
+            if (uri_exact_it != get_exact_it->second.end() && uri_exact_it->second < app->routes.size()) {
+                if (app->log_enabled) std::fprintf(stderr, "[kislay-debug] Found HEAD->GET exact match at index %zu\n", uri_exact_it->second);
+                req->params.clear();
+                req->matched_route = &app->routes[uri_exact_it->second];
+                return const_cast<kislay::Route *>(req->matched_route);
+            }
         }
     }
 
@@ -2468,8 +2636,10 @@ static kislay::Route *kislay_find_route(php_kislay_app_t *app,
     if (any_exact_it != app->exact_routes_by_method.end()) {
         auto uri_exact_it = any_exact_it->second.find(path);
         if (uri_exact_it != any_exact_it->second.end() && uri_exact_it->second < app->routes.size()) {
+            if (app->log_enabled) std::fprintf(stderr, "[kislay-debug] Found global exact match at index %zu\n", uri_exact_it->second);
             req->params.clear();
-            return &app->routes[uri_exact_it->second];
+            req->matched_route = &app->routes[uri_exact_it->second];
+            return const_cast<kislay::Route *>(req->matched_route);
         }
     }
 
@@ -2488,6 +2658,8 @@ static kislay::Route *kislay_find_route(php_kislay_app_t *app,
             }
             auto &route = app->routes[route_index];
             if (kislay_route_matches(route, path_segments, req)) {
+                if (app->log_enabled) std::fprintf(stderr, "[kislay-debug] Found segmented match at index %zu\n", route_index);
+                req->matched_route = &route;
                 return &route;
             }
         }
@@ -2544,11 +2716,28 @@ static void kislay_capture_marshaled_response(php_kislay_request_t *req,
                                               php_kislay_response_t *res,
                                               kislay::runtime::RuntimeResponseMessage &response) {
     response.status_code = kislay_is_valid_http_status(res->status_code) ? res->status_code : 500;
-    response.body = std::move(res->body);
     response.file_path = std::move(res->file_path);
     response.content_type = res->content_type.empty() ? "text/plain" : std::move(res->content_type);
     response.headers = std::move(res->headers);
     response.send_file = res->send_file;
+
+    // Option 4: assign directly from body_zstr when available, avoiding the intermediate
+    // res->body std::string allocation. body_zstr was stolen from smart_str in json()/send().
+    if (res->body_zstr != nullptr) {
+        response.body.assign(ZSTR_VAL(res->body_zstr), ZSTR_LEN(res->body_zstr));
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    } else {
+        response.body = std::move(res->body);
+    }
+
+    // Option 1: set raw_ptr into the now-stable response.body buffer for zero-copy mg_write
+    if (!response.body.empty()) {
+        response.raw_ptr = response.body.c_str();
+        response.raw_len = response.body.size();
+        response.send_raw_buffer = true;
+    }
+
     if (req != nullptr) {
         response.request_id = req->request_id;
         response.traceparent = req->traceparent;
@@ -2672,6 +2861,7 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     zval res_obj;
     object_init_ex(&res_obj, kislay_response_ce);
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ(res_obj));
+    kislay_response_reset_state(res);
 
     bool handled = false;
     bool run_routes = true;
@@ -2762,30 +2952,33 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
                 request_error = handler_error.empty() ? "route callback failed" : handler_error;
                 if (had_exception) {
                     if (!app->error_handlers.empty()) {
-                        zval exception_copy;
-                        ZVAL_OBJ(&exception_copy, EG(exception));
+                        zval exception_val;
+                        ZVAL_OBJ(&exception_val, EG(exception));
                         GC_ADDREF(EG(exception));
                         zend_clear_exception();
+                        
                         for (auto &eh : app->error_handlers) {
                             zval eh_retval;
                             ZVAL_UNDEF(&eh_retval);
                             zval eh_args[4];
-                            ZVAL_COPY(&eh_args[0], &exception_copy);
+                            ZVAL_COPY_VALUE(&eh_args[0], &exception_val);
                             ZVAL_COPY_VALUE(&eh_args[1], &req_obj);
                             ZVAL_COPY_VALUE(&eh_args[2], &res_obj);
                             ZVAL_NULL(&eh_args[3]);
                             call_user_function(nullptr, nullptr, &eh, &eh_retval, 4, eh_args);
                             zval_ptr_dtor(&eh_retval);
-                            zval_ptr_dtor(&eh_args[0]);
                             if (EG(exception)) {
                                 zend_clear_exception();
                             }
                         }
-                        zval_ptr_dtor(&exception_copy);
+                        
+                        zval_ptr_dtor(&exception_val);
                         if (kislay_response_has_terminal_content(res)) {
                             handled = true;
                             goto kislay_runtime_route_done;
                         }
+                    } else {
+                        zend_clear_exception();
                     }
                 } else if (!request_error.empty()) {
                     php_error_docref(nullptr, E_WARNING, "Kislay route execution failed: %s", request_error.c_str());
@@ -2851,9 +3044,14 @@ kislay_runtime_request_done:
     if (UNEXPECTED(app->gc_after_request)) {
         ++app->gc_request_counter;
         if (app->gc_request_counter % app->gc_interval_requests == 0) {
-        gc_collect_cycles();
+            zend_gc_collect_cycles();
         }
     }
+
+    if (kislay_request_end_observer) {
+        kislay_request_end_observer();
+    }
+
     kislay_active_request = old_req;
 }
 
@@ -2880,7 +3078,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
         mg_printf(conn, "HTTP/1.1 200 OK\r\n"
                         "Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
                         "Content-Length: 0\r\n"
-                        "Connection: close\r\n");
+                        "Connection: keep-alive\r\n");
         kislay_write_cors_headers(conn, true);
         if (!app->referrer_policy.empty()) {
             mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
@@ -2934,7 +3132,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
                   "HTTP/1.1 413 Payload Too Large\r\n"
                   "Content-Type: text/plain\r\n"
                   "Content-Length: 17\r\n"
-                  "Connection: close\r\n");
+                  "Connection: keep-alive\r\n");
         kislay_write_cors_headers(conn, app->cors_enabled);
         if (!app->referrer_policy.empty()) {
             mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
@@ -3302,6 +3500,17 @@ PHP_METHOD(KislayRequest, param) {
 
     php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ_P(getThis()));
     std::string_view key(name, name_len);
+    
+    // O(1) lookup if matched_route is available
+    if (req->matched_route != nullptr) {
+        auto it = req->matched_route->param_index_map.find(std::string(key));
+        if (it != req->matched_route->param_index_map.end() && it->second < req->params.size()) {
+            const auto &val = req->params[it->second].value;
+            RETURN_STRINGL(val.data(), val.size());
+        }
+    }
+
+    // Fallback to O(N) search
     const std::string_view *value = kislay_find_request_field(req->params, key);
     if (value == nullptr) {
         if (default_val != nullptr) {
@@ -3811,9 +4020,20 @@ PHP_METHOD(KislayResponse, send) {
         res->status_code = status;
     }
 
+    // Release any existing body_zstr
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
+
+    // Option 4: for string input, store zend_string* directly (zval_get_string adds a refcount,
+    // no copy needed until marshal time)
     zend_string *body_str = zval_get_string(body);
-    kislay_response_set_body(res, ZSTR_VAL(body_str), ZSTR_LEN(body_str));
-    zend_string_release(body_str);
+    res->body.clear();
+    res->headers.erase("content-length");
+    res->send_file = false;
+    res->file_path.clear();
+    res->body_zstr = body_str; // takes ownership of the refcount from zval_get_string
     RETURN_ZVAL(getThis(), 1, 0);
 }
 
@@ -3832,15 +4052,25 @@ PHP_METHOD(KislayResponse, sendJson) {
     }
 
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(getThis()));
+    // Release any existing body_zstr before encoding
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
     smart_str buf = {0};
     php_json_encode(&buf, data, 0);
     smart_str_0(&buf);
+    // Option 4: steal the smart_str zend_string directly — no copy into res->body
     if (buf.s != nullptr) {
-        kislay_response_set_body(res, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+        res->body.clear();
+        res->headers.erase("content-length");
+        res->send_file = false;
+        res->file_path.clear();
+        res->body_zstr = buf.s; // steal — do NOT call smart_str_free
+        buf.s = nullptr;
     } else {
         kislay_response_set_body(res, "", 0);
     }
-    smart_str_free(&buf);
 
     res->status_code = status;
     res->content_type = "application/json; charset=utf-8";
@@ -3883,15 +4113,25 @@ PHP_METHOD(KislayResponse, json) {
     }
 
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(getThis()));
+    // Release any existing body_zstr before encoding
+    if (res->body_zstr != nullptr) {
+        zend_string_release(res->body_zstr);
+        res->body_zstr = nullptr;
+    }
     smart_str buf = {0};
     php_json_encode(&buf, data, 0);
     smart_str_0(&buf);
+    // Option 4: steal the smart_str zend_string directly — no copy into res->body
     if (buf.s != nullptr) {
-        kislay_response_set_body(res, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
+        res->body.clear();
+        res->headers.erase("content-length");
+        res->send_file = false;
+        res->file_path.clear();
+        res->body_zstr = buf.s; // steal — do NOT call smart_str_free
+        buf.s = nullptr;
     } else {
         kislay_response_set_body(res, "", 0);
     }
-    smart_str_free(&buf);
 
     res->status_code = status;
     res->content_type = "application/json; charset=utf-8";
@@ -4258,6 +4498,7 @@ PHP_METHOD(KislayApp, every) {
         Z_PARAM_ZVAL(cb)
     ZEND_PARSE_PARAMETERS_END();
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    app->async_enabled = true;
     if (app->php_runtime_pool &&
         app->php_runtime_pool->runtime_threads() > 1) {
         zend_throw_exception(zend_ce_exception,
@@ -4279,7 +4520,7 @@ PHP_METHOD(KislayApp, every) {
         std::lock_guard<std::mutex> lock(*app->scheduler_lock);
         app->scheduled_tasks.push_back(std::move(task));
         if (!app->scheduler_running.exchange(true, std::memory_order_acq_rel)) {
-            *app->scheduler_thread = std::thread([app]() { kislay_run_scheduler(app); });
+            app->scheduler_thread.reset(new std::thread([app]() { kislay_run_scheduler(app); }));
         }
     }
     RETURN_ZVAL(getThis(), 1, 0);
@@ -4292,6 +4533,7 @@ PHP_METHOD(KislayApp, once) {
         Z_PARAM_ZVAL(cb)
     ZEND_PARSE_PARAMETERS_END();
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    app->async_enabled = true;
     if (app->php_runtime_pool &&
         app->php_runtime_pool->runtime_threads() > 1) {
         zend_throw_exception(zend_ce_exception,
@@ -4313,7 +4555,7 @@ PHP_METHOD(KislayApp, once) {
         std::lock_guard<std::mutex> lock(*app->scheduler_lock);
         app->scheduled_tasks.push_back(std::move(task));
         if (!app->scheduler_running.exchange(true, std::memory_order_acq_rel)) {
-            *app->scheduler_thread = std::thread([app]() { kislay_run_scheduler(app); });
+            app->scheduler_thread.reset(new std::thread([app]() { kislay_run_scheduler(app); }));
         }
     }
     RETURN_ZVAL(getThis(), 1, 0);
@@ -4326,6 +4568,7 @@ PHP_METHOD(KislayApp, schedule) {
         Z_PARAM_ZVAL(cb)
     ZEND_PARSE_PARAMETERS_END();
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    app->async_enabled = true;
     if (app->php_runtime_pool &&
         app->php_runtime_pool->runtime_threads() > 1) {
         zend_throw_exception(zend_ce_exception,
@@ -4348,7 +4591,7 @@ PHP_METHOD(KislayApp, schedule) {
         std::lock_guard<std::mutex> lock(*app->scheduler_lock);
         app->scheduled_tasks.push_back(std::move(task));
         if (!app->scheduler_running.exchange(true, std::memory_order_acq_rel)) {
-            *app->scheduler_thread = std::thread([app]() { kislay_run_scheduler(app); });
+            app->scheduler_thread.reset(new std::thread([app]() { kislay_run_scheduler(app); }));
         }
     }
     RETURN_ZVAL(getThis(), 1, 0);
@@ -4402,6 +4645,11 @@ PHP_METHOD(KislayApp, setOption) {
         );
         RETURN_TRUE;
     }
+    if (key == "workers" || key == "worker_count") {
+        app->worker_count = static_cast<int>(zval_get_long(value));
+        if (app->worker_count < 1) app->worker_count = 1;
+        RETURN_TRUE;
+    }
     if (key == "request_timeout_ms" || key == "read_timeout_ms") {
         app->read_timeout_ms = kislay_sanitize_timeout_ms(
             zval_get_long(value),
@@ -4420,6 +4668,14 @@ PHP_METHOD(KislayApp, setOption) {
     }
     if (key == "cors" || key == "cors_enabled") {
         app->cors_enabled = kislay_zval_to_bool(value, app->cors_enabled, "Kislay\\Core\\App::setOption(cors)");
+        RETURN_TRUE;
+    }
+    if (key == "keep_alive") {
+        app->enable_keep_alive = kislay_zval_to_bool(value, app->enable_keep_alive, "Kislay\\Core\\App::setOption(keep_alive)");
+        RETURN_TRUE;
+    }
+    if (key == "keep_alive_timeout_ms") {
+        app->keep_alive_timeout_ms = zval_get_long(value);
         RETURN_TRUE;
     }
     if (key == "referrer_policy" || key == "referrer-policy") {
@@ -4486,6 +4742,25 @@ PHP_METHOD(KislayApp, setOption) {
             RETURN_TRUE;
         }
         app->default_tls_key = candidate;
+        RETURN_TRUE;
+    }
+    if (key == "max_requests") {
+        app->max_requests = static_cast<std::uint32_t>(zval_get_long(value));
+        RETURN_TRUE;
+    }
+    if (key == "queue_size" || key == "request_queue_size") {
+        app->queue_size = static_cast<std::size_t>(zval_get_long(value));
+        RETURN_TRUE;
+    }
+    if (key == "server_type" || key == "runtime_server") {
+        zend_string *s = zval_get_string(value);
+        std::string type = kislay_to_lower(std::string(ZSTR_VAL(s), ZSTR_LEN(s)));
+        zend_string_release(s);
+        if (type == "libuv" || type == "uv" || type == "eventloop") {
+            app->server_type = "libuv";
+        } else {
+            app->server_type = "civetweb";
+        }
         RETURN_TRUE;
     }
     if (key == "document_root") {
@@ -4583,8 +4858,15 @@ static bool kislay_app_add_route(php_kislay_app_t *app, const std::string &metho
     kislay_route_compile_middleware(app, &app->routes[index]);
     if (app->routes[index].exact) {
         app->exact_routes_by_method[app->routes[index].method][app->routes[index].pattern] = index;
-    } else {
-        app->segmented_routes_by_method[app->routes[index].method][app->routes[index].segments.size()].push_back(index);
+        if (app->log_enabled) {
+            std::fprintf(stderr, "[kislay-debug] Registered Exact: Method=%s, Pattern=%s, Index=%zu\n",
+                         app->routes[index].method.c_str(), app->routes[index].pattern.c_str(), index);
+        }
+    } else {        app->segmented_routes_by_method[app->routes[index].method][app->routes[index].segments.size()].push_back(index);
+        if (app->log_enabled) {
+            std::fprintf(stderr, "[kislay-debug] Registered Segmented: Method=%s, Pattern=%s, Index=%zu, Segs=%zu\n", 
+                         app->routes[index].method.c_str(), app->routes[index].pattern.c_str(), index, app->routes[index].segments.size());
+        }
     }
     return true;
 }
@@ -4998,24 +5280,54 @@ PHP_METHOD(KislayApp, listen) {
     app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listen");
     app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listen");
 
-    if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
-        zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
-        RETURN_FALSE;
+    bool is_worker = false;
+    std::vector<pid_t> children;
+    if (app->worker_count > 1) {
+        for (int i = 0; i < app->worker_count - 1; ++i) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                is_worker = true;
+                break;
+            } else if (pid > 0) {
+                children.push_back(pid);
+            } else {
+                php_error_docref(nullptr, E_WARNING, "fork() failed");
+            }
+        }
     }
-    if (!kislay_app_start_runtime(app, true)) {
-        kislay_app_stop_server(app);
+
+    if (!kislay_app_start_runtime(app, false)) {
         zend_throw_exception(zend_ce_exception, "Failed to start PHP runtime", 0);
         RETURN_FALSE;
     }
 
-    if (app->async_enabled) {
-        app->loop_active.store(true, std::memory_order_relaxed);
-        if (app->async_bridge) {
-            app->async_bridge->start(static_cast<std::size_t>(std::max(app->async_worker_count, 1)));
+    if (app->server_type == "libuv") {
+        if (!kislay_app_start_server_uv(app, listen_addr)) {
+            kislay_app_stop_runtime(app);
+            zend_throw_exception(zend_ce_exception, "Failed to start libuv server", 0);
+            RETURN_FALSE;
+        }
+    } else {
+        if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
+            kislay_app_stop_runtime(app);
+            zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
+            RETURN_FALSE;
         }
     }
 
+    // AsyncBridge is started in start_runtime
     kislay_app_wait_loop(app, -1);
+
+    if (app->worker_count > 1) {
+        if (!is_worker) {
+            for (pid_t child_pid : children) {
+                int status;
+                waitpid(child_pid, &status, 0);
+            }
+        } else {
+            exit(0);
+        }
+    }
 
     RETURN_TRUE;
 }
@@ -5032,12 +5344,17 @@ PHP_METHOD(KislayApp, listenAsync) {
         Z_PARAM_ARRAY(tls)
     ZEND_PARSE_PARAMETERS_END();
 
+    php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    if (!app->is_zts_runtime) {
+        zend_throw_exception(zend_ce_exception, "listenAsync() requires ZTS. In NTS mode, use listen().", 0);
+        RETURN_FALSE;
+    }
+
     if (port <= 0 || port > 65535) {
         zend_throw_exception(zend_ce_exception, "Invalid port", 0);
         RETURN_FALSE;
     }
 
-    php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
     if (app->ctx != nullptr) {
         zend_throw_exception(zend_ce_exception, "Server already running", 0);
         RETURN_FALSE;
@@ -5074,24 +5391,30 @@ PHP_METHOD(KislayApp, listenAsync) {
     app->thread_count = kislay_sanitize_thread_count(app->thread_count, KISLAYPHP_EXTENSION_G(http_threads), "Kislay\\Core\\App::listenAsync");
     app->read_timeout_ms = kislay_sanitize_timeout_ms(app->read_timeout_ms, KISLAYPHP_EXTENSION_G(read_timeout_ms), "Kislay\\Core\\App::listenAsync");
 
-    if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
-        zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
-        RETURN_FALSE;
-    }
     if (!kislay_app_start_runtime(app, false)) {
-        kislay_app_stop_server(app);
         zend_throw_exception(zend_ce_exception, "Failed to start PHP runtime", 0);
         RETURN_FALSE;
     }
 
-    if (app->async_enabled) {
-        app->loop_active.store(true, std::memory_order_relaxed);
-        if (app->async_bridge) {
-            app->async_bridge->start(static_cast<std::size_t>(std::max(app->async_worker_count, 1)));
+    if (app->server_type == "libuv") {
+        if (!kislay_app_start_server_uv(app, listen_addr)) {
+            kislay_app_stop_runtime(app);
+            zend_throw_exception(zend_ce_exception, "Failed to start libuv server", 0);
+            RETURN_FALSE;
+        }
+    } else {
+        if (!kislay_app_start_server(app, listen_addr, cert_path, key_path)) {
+            kislay_app_stop_runtime(app);
+            zend_throw_exception(zend_ce_exception, "Failed to start server", 0);
+            RETURN_FALSE;
         }
     }
 
-    RETURN_TRUE;
+    // AsyncBridge is started in start_runtime
+    if (app->server_type == "libuv") { // Actually this is for listenAsync, let's just make it return true if not blocking
+        RETURN_TRUE;
+    }
+    kislay_app_wait_loop(app, -1);
 }
 
 PHP_METHOD(KislayApp, wait) {

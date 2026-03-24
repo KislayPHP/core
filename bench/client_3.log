@@ -1,0 +1,8 @@
+Benchmarking http://127.0.0.1:9090/plaintext
+Concurrency: 50, Total Requests: 2000
+
+Results:
+Time taken: 0.508 seconds
+Completed requests: 2000
+Requests per second: 3936.91
+Average latency: 12.700 ms

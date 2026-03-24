@@ -49,6 +49,12 @@ struct RuntimeResponseMessage {
     TaskId task_id{0};
     long status_code{200};
     std::string body;
+    // Option 1: zero-copy send path — raw_ptr points into body.c_str() after body is filled.
+    // kislay_send_marshaled_response uses raw_ptr/raw_len directly for mg_write, bypassing
+    // any further std::string indirection.
+    const char *raw_ptr{nullptr};
+    std::size_t raw_len{0};
+    bool send_raw_buffer{false};
     std::string file_path;
     std::string content_type{"text/plain"};
     std::unordered_map<std::string, std::string> headers;
