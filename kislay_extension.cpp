@@ -15,9 +15,14 @@ ZEND_TSRMLS_CACHE_EXTERN();
 }
 
 #include <curl/curl.h>
+#include <openssl/rand.h>
 #include <thread>
 #include <future>
 #include <memory>
+
+#if defined(_WIN32)
+#include <bcrypt.h>
+#endif
 
 #include "php_kislay_extension.h"
 
@@ -1809,15 +1814,31 @@ static long long kislay_response_size_bytes(const php_kislay_response_t *res) {
 
 static std::string kislay_generate_request_id() {
     unsigned char bytes[16];
+    auto fill_random = [](unsigned char *target, size_t size) {
 #ifdef __APPLE__
-    arc4random_buf(bytes, 16);
+        arc4random_buf(target, size);
+        return true;
+#elif defined(_WIN32)
+        return BCryptGenRandom(NULL, target, static_cast<ULONG>(size), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 #else
-    {
+        if (RAND_bytes(target, static_cast<int>(size)) == 1) {
+            return true;
+        }
         int fd = ::open("/dev/urandom", O_RDONLY);
-        if (fd >= 0) { ::read(fd, bytes, 16); ::close(fd); }
-        else { for (int i = 0; i < 16; i++) bytes[i] = (unsigned char)rand(); }
-    }
+        if (fd >= 0) {
+            const ssize_t nread = ::read(fd, target, size);
+            ::close(fd);
+            if (nread == static_cast<ssize_t>(size)) {
+                return true;
+            }
+        }
+        for (size_t i = 0; i < size; ++i) {
+            target[i] = static_cast<unsigned char>(rand());
+        }
+        return false;
 #endif
+    };
+    fill_random(bytes, sizeof(bytes));
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     char uuid[37];
@@ -2720,13 +2741,21 @@ static kislay::Route *kislay_find_route(php_kislay_app_t *app,
 static std::string kislay_random_hex(size_t bytes) {
     std::string result(bytes * 2, '0');
     unsigned char buf[32] = {0};
+    if (bytes > sizeof(buf)) {
+        bytes = sizeof(buf);
+    }
 #ifdef __APPLE__
     arc4random_buf(buf, bytes);
 #elif defined(_WIN32)
-    BCryptGenRandom(NULL, buf, (ULONG)bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    BCryptGenRandom(NULL, buf, static_cast<ULONG>(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 #else
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (f) { fread(buf, 1, bytes, f); fclose(f); }
+    if (RAND_bytes(buf, static_cast<int>(bytes)) != 1) {
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (f) {
+            fread(buf, 1, bytes, f);
+            fclose(f);
+        }
+    }
 #endif
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < bytes; i++) {
@@ -3220,11 +3249,26 @@ static int kislay_begin_request(struct mg_connection *conn) {
         }
     }
     const bool needs_internal_request_id = app->request_id_enabled || app->async_enabled;
-    if (UNEXPECTED(needs_internal_request_id) && request.headers.find("x-correlation-id") == request.headers.end()) {
-        request.headers["x-correlation-id"] = kislay_generate_request_id();
-    }
-    if (UNEXPECTED(needs_internal_request_id) && request.headers.find("x-request-id") == request.headers.end()) {
-        request.headers["x-request-id"] = kislay_generate_request_id();
+    if (UNEXPECTED(needs_internal_request_id)) {
+        auto correlation_it = request.headers.find("x-correlation-id");
+        auto request_id_it = request.headers.find("x-request-id");
+
+        if (correlation_it == request.headers.end() || correlation_it->second.empty() ||
+            request_id_it == request.headers.end() || request_id_it->second.empty()) {
+            const std::string resolved_request_id =
+                (request_id_it != request.headers.end() && !request_id_it->second.empty())
+                    ? request_id_it->second
+                    : ((correlation_it != request.headers.end() && !correlation_it->second.empty())
+                        ? correlation_it->second
+                        : kislay_generate_request_id());
+
+            if (request_id_it == request.headers.end() || request_id_it->second.empty()) {
+                request.headers["x-request-id"] = resolved_request_id;
+            }
+            if (correlation_it == request.headers.end() || correlation_it->second.empty()) {
+                request.headers["x-correlation-id"] = resolved_request_id;
+            }
+        }
     }
     if (UNEXPECTED(app->trace_enabled) && request.headers.find("traceparent") == request.headers.end()) {
         const std::string trace_id = kislay_random_hex(16);
