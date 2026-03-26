@@ -44,12 +44,18 @@ if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
   PKG_CHECK_MODULES([OPENSSL], [openssl])
   PHP_EVAL_INCLINE($OPENSSL_CFLAGS)
   PHP_EVAL_LIBLINE($OPENSSL_LIBS, KISLAYPHP_EXTENSION_SHARED_LIBADD)
+  PKG_CHECK_MODULES([LIBUV], [libuv])
+  PHP_EVAL_INCLINE($LIBUV_CFLAGS)
+  PHP_EVAL_LIBLINE($LIBUV_LIBS, KISLAYPHP_EXTENSION_SHARED_LIBADD)
+  PKG_CHECK_MODULES([LLHTTP], [libllhttp])
+  PHP_EVAL_INCLINE($LLHTTP_CFLAGS)
+  PHP_EVAL_LIBLINE($LLHTTP_LIBS, KISLAYPHP_EXTENSION_SHARED_LIBADD)
   PHP_ADD_LIBRARY(stdc++,, KISLAYPHP_EXTENSION_SHARED_LIBADD)
   PHP_SUBST(KISLAYPHP_EXTENSION_SHARED_LIBADD)
 
   CFLAGS="$CFLAGS -DOPENSSL_API_3_0"
-  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0"
+  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -std=c++17"
 
   PHP_ADD_INCLUDE($srcdir/include)
-  PHP_NEW_EXTENSION(kislayphp_extension, kislay_extension.cpp src/runtime/event_loop.cpp src/runtime/worker_pool.cpp src/runtime/async_bridge.cpp src/runtime/php_runtime.cpp third_party/civetweb/src/civetweb.c, $ext_shared)
+  PHP_NEW_EXTENSION(kislayphp_extension, kislay_extension.cpp src/runtime/event_loop.cpp src/runtime/worker_pool.cpp src/runtime/async_bridge.cpp src/runtime/php_runtime.cpp src/runtime/uv_server.cpp third_party/civetweb/src/civetweb.c, $ext_shared)
 fi
