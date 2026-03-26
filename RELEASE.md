@@ -2,6 +2,12 @@
 
 ## Current release
 
+### v0.0.8 (2026-03-26)
+
+- fix released source archive by tracking `uv_server` runtime files
+- align `PhpRuntimePool` header with implementation (`max_requests`, `supervisor_main`)
+- add export-ignore rules so PIE/GitHub archives stop shipping build junk and legacy trees
+
 ### v0.0.7 (2026-03-24)
 - **Zero-copy response via `raw_ptr`**: `RuntimeResponseMessage` now carries `raw_ptr/raw_len/send_raw_buffer`; `mg_write()` reads directly from the buffer — one fewer `std::string` copy per response
 - **`zend_string*` body field**: `_php_kislay_response_t` holds `body_zstr` so `send()`, `sendJson()`, `json()` store the PHP string by refcount instead of copying into a `std::string`

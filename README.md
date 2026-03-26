@@ -2,14 +2,14 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-0.0.6-orange.svg)]()
+[![Release](https://img.shields.io/badge/Release-0.0.8-orange.svg)]()
 
 Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the embedded HTTP/HTTPS server, strict segment router, request/response lifecycle, middleware, async bridge, and Promise primitives used by the higher-level modules.
 
 ## Install
 
 ```bash
-pie install kislayphp/core:0.0.6
+pie install kislayphp/core:0.0.8
 ```
 
 ```ini
@@ -100,7 +100,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally for `0.0.6` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
+Validated locally for `0.0.8` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
@@ -122,7 +122,7 @@ Native C++-only paths remain faster than PHP-routed paths. If you need materiall
 php run-tests.php
 ```
 
-Current local release-candidate result for `0.0.6`:
+Current local release-candidate result for `0.0.8`:
 
 - `15 passed`
 - `2 skipped` (`ZTS`-only async coverage)

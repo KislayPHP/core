@@ -2,7 +2,7 @@
 
 ## Overview
 
-`kislayphp/core:0.0.6` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, but hardens the request path around a stricter and faster routing model:
+`kislayphp/core:0.0.8` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, and fixes the shipped source archive so the runtime tree builds cleanly through PIE:
 
 - strict segment router only (`/users/:id`)
 - compiled middleware chains per matched route
@@ -13,7 +13,7 @@
 ## Installation
 
 ```bash
-pie install kislayphp/core:0.0.6
+pie install kislayphp/core:0.0.8
 ```
 
 ```ini
@@ -127,7 +127,7 @@ $app->setOption('gc_interval_requests', 1000);
 $app->setOption('async_threads', 4);
 ```
 
-## Release notes for 0.0.6
+## Release notes for 0.0.8
 
 - strict segment router replaces regex matching in the hot path
 - middleware contract simplified to boolean continuation

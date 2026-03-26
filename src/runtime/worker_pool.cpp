@@ -17,6 +17,7 @@ size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
 HttpResultMessage perform_http_request(const HttpRequestTask &task) {
     HttpResultMessage result;
     result.task_id = task.task_id;
+    result.owner_lane = task.owner_lane;
 
     CURL *curl = curl_easy_init();
     if (curl == nullptr) {

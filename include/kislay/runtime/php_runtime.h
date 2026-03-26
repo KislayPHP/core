@@ -28,6 +28,7 @@ struct PhpRuntimeConfig {
     bool background_thread{false};
     std::size_t runtime_threads{1};
     std::size_t request_queue_size{2048};
+    std::uint32_t max_requests{0};
 };
 
 class RequestCompletion {
@@ -67,6 +68,7 @@ public:
 
 private:
     void worker_main(std::size_t runtime_index);
+    void supervisor_main(std::size_t runtime_index);
     void notify_activity();
 
     PhpRuntimeConfig config_;
