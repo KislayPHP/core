@@ -13,6 +13,8 @@ DURATION="${BENCH_DURATION:-20}"
 CONCURRENCY="${BENCH_CONCURRENCY:-200}"
 THREADS="${BENCH_THREADS:-4}"
 REQUESTS="${BENCH_REQUESTS:-50000}"
+BENCH_WORKERS="${BENCH_WORKERS:-10}"
+BENCH_HTTP_THREADS="${BENCH_HTTP_THREADS:-8}"
 
 EXT_PATH="${KISLAY_EXTENSION_PATH:-$ROOT_DIR/modules/kislayphp_extension.so}"
 SERVER_SCRIPT="$BENCH_DIR/benchmark_server.php"
@@ -25,7 +27,15 @@ if [[ ! -f "$EXT_PATH" ]]; then
 fi
 
 echo "Starting benchmark server..."
-php -c /dev/null -d extension="$EXT_PATH" "$SERVER_SCRIPT" >"$RESULTS_DIR/server.log" 2>&1 &
+env \
+  BENCH_HOST="$HOST" \
+  BENCH_PORT="$PORT" \
+  BENCH_WORKERS="$BENCH_WORKERS" \
+  BENCH_HTTP_THREADS="$BENCH_HTTP_THREADS" \
+  KISLAYPHP_HTTP_LOG=0 \
+  KISLAYPHP_HTTP_REQUEST_ID=0 \
+  KISLAYPHP_HTTP_TRACE=0 \
+  php -c /dev/null -d extension="$EXT_PATH" "$SERVER_SCRIPT" >"$RESULTS_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -52,6 +62,7 @@ URL="http://$HOST:$PORT$TARGET_PATH"
 
 echo "Benchmark target: $URL" | tee "$OUT_FILE"
 echo "Duration: ${DURATION}s, Concurrency: $CONCURRENCY" | tee -a "$OUT_FILE"
+echo "Workers: $BENCH_WORKERS, HTTP threads: $BENCH_HTTP_THREADS" | tee -a "$OUT_FILE"
 
 echo "" | tee -a "$OUT_FILE"
 if command -v wrk >/dev/null 2>&1; then

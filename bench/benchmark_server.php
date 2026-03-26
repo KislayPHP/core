@@ -7,8 +7,15 @@ if (!extension_loaded('kislayphp_extension')) {
 
 $port = (int) (getenv('BENCH_PORT') ?: 9090);
 $host = getenv('BENCH_HOST') ?: '127.0.0.1';
+$benchWorkers = (int) (getenv('BENCH_WORKERS') ?: 10);
+$benchThreads = (int) (getenv('BENCH_HTTP_THREADS') ?: 8);
 
 $app = new Kislay\Core\App();
+$app->setOption('log', false);
+$app->setOption('num_threads', $benchThreads);
+if ($benchWorkers > 1) {
+    $app->setOption('workers', $benchWorkers);
+}
 
 $bigFile = __DIR__ . '/static-1mb.bin';
 if (!file_exists($bigFile)) {
@@ -31,12 +38,15 @@ $app->get('/plaintext', function ($req, $res) {
     $res->send('hello from kislayphp');
 });
 
-$app->get('/json', function ($req, $res) {
-    $res->json([
-        'status' => 'ok',
-        'service' => 'kislay-bench',
-        'ts' => microtime(true),
-    ]);
+$jsonPayload = json_encode([
+    'status' => 'ok',
+    'service' => 'kislay-bench',
+    'ts' => 1700000000.123456,
+], JSON_UNESCAPED_SLASHES);
+
+$app->get('/json', function ($req, $res) use ($jsonPayload) {
+    $res->setHeader('Content-Type', 'application/json');
+    $res->send($jsonPayload);
 });
 
 $app->get('/async', function ($req, $res) {

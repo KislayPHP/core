@@ -11,5 +11,10 @@ This directory contains benchmark tooling for `kislayphp/core`.
 ## Typical flow
 
 - Run `./bench/run_benchmark.sh` or `./bench/run_benchmark_stable.sh`.
+- The benchmark profile defaults to NTS multi-process mode:
+  - `BENCH_WORKERS=10`
+  - `BENCH_HTTP_THREADS=8`
+  - request logging, request-id generation, and tracing disabled
+- `./bench/perf_test.sh` now uses `wrk` or `ab` by default instead of the old PHP client path.
 - Review local outputs in `bench/results/`.
 - Publish only curated summary findings in release notes, not raw artifacts.

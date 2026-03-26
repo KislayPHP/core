@@ -12,6 +12,8 @@ DURATION="${BENCH_DURATION:-10}"
 CONCURRENCY="${BENCH_CONCURRENCY:-100}"
 THREADS="${BENCH_THREADS:-4}"
 REQUESTS="${BENCH_REQUESTS:-20000}"
+BENCH_WORKERS="${BENCH_WORKERS:-10}"
+BENCH_HTTP_THREADS="${BENCH_HTTP_THREADS:-8}"
 
 EXT_PATH="${KISLAY_EXTENSION_PATH:-$ROOT_DIR/modules/kislayphp_extension.so}"
 SERVER_SCRIPT="$BENCH_DIR/benchmark_server.php"
@@ -35,7 +37,15 @@ else
   exit 1
 fi
 
-php -c /dev/null -d extension="$EXT_PATH" "$SERVER_SCRIPT" >"$RESULTS_DIR/server-$RUN_ID.log" 2>&1 &
+env \
+  BENCH_HOST="$HOST" \
+  BENCH_PORT="$PORT" \
+  BENCH_WORKERS="$BENCH_WORKERS" \
+  BENCH_HTTP_THREADS="$BENCH_HTTP_THREADS" \
+  KISLAYPHP_HTTP_LOG=0 \
+  KISLAYPHP_HTTP_REQUEST_ID=0 \
+  KISLAYPHP_HTTP_TRACE=0 \
+  php -c /dev/null -d extension="$EXT_PATH" "$SERVER_SCRIPT" >"$RESULTS_DIR/server-$RUN_ID.log" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -65,6 +75,8 @@ echo "" >> "$SUMMARY_FILE"
 echo "- Tool: $TOOL" >> "$SUMMARY_FILE"
 echo "- Host: $HOST:$PORT" >> "$SUMMARY_FILE"
 echo "- Concurrency: $CONCURRENCY" >> "$SUMMARY_FILE"
+echo "- Workers: $BENCH_WORKERS" >> "$SUMMARY_FILE"
+echo "- HTTP threads: $BENCH_HTTP_THREADS" >> "$SUMMARY_FILE"
 if [[ "$TOOL" == "wrk" ]]; then
   echo "- Duration: ${DURATION}s" >> "$SUMMARY_FILE"
   echo "- Threads: $THREADS" >> "$SUMMARY_FILE"

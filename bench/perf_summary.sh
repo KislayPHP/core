@@ -6,10 +6,11 @@ EXT_PATH="$ROOT_DIR/modules/kislayphp_extension.so"
 SERVER_SCRIPT="$ROOT_DIR/bench/benchmark_server.php"
 CLIENT_SCRIPT="$ROOT_DIR/bench/simple_bench_client.php"
 
-# Disable logging for maximum performance
 export KISLAYPHP_HTTP_LOG=0
-# Use 8 threads for the server
-export KISLAYPHP_HTTP_THREADS=8
+export KISLAYPHP_HTTP_REQUEST_ID=0
+export KISLAYPHP_HTTP_TRACE=0
+export KISLAYPHP_HTTP_THREADS="${BENCH_HTTP_THREADS:-8}"
+export KISLAYPHP_WORKERS="${BENCH_WORKERS:-10}"
 
 run_summary() {
     local server_type=$1

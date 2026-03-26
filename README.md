@@ -105,7 +105,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally for `0.0.8` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
+Validated locally for `0.0.8` on the current NTS reference machine with tracing, request-id generation, and request logging disabled, using the benchmark profile in `bench/benchmark_server.php` with multi-process workers (`BENCH_WORKERS=10`):
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
