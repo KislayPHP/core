@@ -249,8 +249,8 @@ struct KislayPHPSession {
         : active(false)
         , previous_state(kislay_php_thread_active) {
 #if defined(ZTS)
-        void ***tsrm_ls = (void ***) ts_resource(0);
-        TSRMLS_CACHE_UPDATE();
+        (void) ts_resource(0);
+        ZEND_TSRMLS_CACHE_UPDATE();
         if (php_request_startup() == SUCCESS) {
             active = true;
         }
@@ -2774,11 +2774,8 @@ static void kislay_capture_marshaled_response(php_kislay_request_t *req,
     }
 
     // Option 1: set raw_ptr into the now-stable response.body buffer for zero-copy mg_write
-    if (!response.body.empty()) {
-        response.raw_ptr = response.body.c_str();
-        response.raw_len = response.body.size();
-        response.send_raw_buffer = true;
-    }
+    response.send_raw_buffer = !response.body.empty();
+    response.refresh_raw_buffer_view();
 
     if (req != nullptr) {
         response.request_id = req->request_id;
