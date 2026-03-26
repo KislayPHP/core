@@ -16,6 +16,7 @@ class RequestCompletion;
 
 struct HttpRequestTask {
     TaskId task_id{0};
+    std::size_t owner_lane{0};
     std::string method;
     std::string url;
     std::vector<std::string> headers;
@@ -27,10 +28,16 @@ struct HttpRequestTask {
 
 struct HttpResultMessage {
     TaskId task_id{0};
+    std::size_t owner_lane{0};
     bool ok{false};
     long response_code{0};
     std::string response_body;
     std::string error_message;
+};
+
+struct PhpTaskMessage {
+    PhpTaskId task_id{0};
+    std::size_t owner_lane{0};
 };
 
 struct RuntimeRequestMessage {
