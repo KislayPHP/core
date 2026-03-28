@@ -2,6 +2,12 @@
 
 ## Current release
 
+### v0.0.10 (2026-03-28)
+
+- vendor the generated `llhttp` release sources in `third_party/llhttp`
+- remove the external `libllhttp` build prerequisite from PIE/source installs
+- keep the existing Docker/macOS/Linux validation path while making Ubuntu installs one-command after the standard dev packages are present
+
 ### v0.0.9 (2026-03-28)
 
 - fix Linux request-object lifecycle crash by constructing and destroying the trace strings with the rest of the request state

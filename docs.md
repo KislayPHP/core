@@ -2,7 +2,7 @@
 
 ## Overview
 
-`kislayphp/core:0.0.9` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, fixes the Linux request-object lifecycle crash found during clean Docker validation, and keeps the shipped source tree buildable through PIE:
+`kislayphp/core:0.0.10` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, fixes the Linux request-object lifecycle crash found during clean Docker validation, vendors the generated `llhttp` release sources, and keeps the shipped source tree buildable through PIE without a system `libllhttp` package:
 
 - strict segment router only (`/users/:id`)
 - compiled middleware chains per matched route
@@ -14,25 +14,18 @@
 
 Build prerequisites:
 
-- macOS (Homebrew): `brew install libuv llhttp`
-- Ubuntu 24.04: install `libuv` dev headers and build `llhttp` from the upstream release tarball because `libllhttp-dev` is not available on the tested image
+- macOS (Homebrew): `brew install libuv`
+- Debian/Ubuntu: install the development packages for `libuv`, `curl`, and OpenSSL
 
 Ubuntu 24.04 reference prerequisite flow:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev cmake curl
-curl -L https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.1.tar.gz -o /tmp/llhttp.tar.gz
-rm -rf /tmp/llhttp-src && mkdir -p /tmp/llhttp-src
-tar -xzf /tmp/llhttp.tar.gz -C /tmp/llhttp-src --strip-components=1
-cmake -S /tmp/llhttp-src -B /tmp/llhttp-src/build -DBUILD_SHARED_LIBS=ON
-cmake --build /tmp/llhttp-src/build -j"$(nproc)"
-sudo cmake --install /tmp/llhttp-src/build
-sudo ldconfig
+sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev
 ```
 
 ```bash
-pie install kislayphp/core:0.0.9
+pie install kislayphp/core:0.0.10
 ```
 
 ```ini
@@ -130,8 +123,8 @@ Release-candidate local results on the current NTS machine:
 
 Install verification:
 
-- macOS 8.5.2 NTS: PIE resolved, configured, and built `kislayphp/core:0.0.9`; the built module loaded successfully from the PIE work directory as `kislayphp_extension 0.0.9`
-- Ubuntu 24.04.3 LTS EC2, PHP 8.3.6 NTS: full `pie install --skip-enable-extension --no-cache kislayphp/core:0.0.9` completed successfully after installing `llhttp` from the release tarball, and the installed module loaded successfully from `php-config --extension-dir`
+- macOS 8.5.2 NTS: PIE resolved, configured, and built `kislayphp/core:0.0.10`; the built module loaded successfully from the PIE work directory as `kislayphp_extension 0.0.10`
+- Ubuntu 24.04.3 LTS EC2, PHP 8.3.6 NTS: full `pie install --skip-enable-extension --no-cache kislayphp/core:0.0.10` completed successfully with only the documented `libuv`, `curl`, and OpenSSL dev packages installed
 
 ## Operational guidance
 
@@ -151,9 +144,10 @@ $app->setOption('gc_interval_requests', 1000);
 $app->setOption('async_threads', 4);
 ```
 
-## Release notes for 0.0.9
+## Release notes for 0.0.10
 
 - construct and destroy request trace strings correctly, fixing the Linux first-request segfault in clean Docker runs
 - keep the single-lane fast path for local NTS builds while preserving the guarded async runtime model
 - add `bench/docker_benchmark.sh` so NTS and ZTS can be validated from clean PHP 8.5 containers before release
 - local PHPT suite and Docker source builds both stay green for this release line
+- vendor the generated `llhttp` release sources into `third_party/llhttp`, removing the external `libllhttp` prerequisite for PIE installs

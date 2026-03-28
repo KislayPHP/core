@@ -2,7 +2,7 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-0.0.9-orange.svg)]()
+[![Release](https://img.shields.io/badge/Release-0.0.10-orange.svg)]()
 
 Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the embedded HTTP/HTTPS server, strict segment router, request/response lifecycle, middleware, async bridge, and Promise primitives used by the higher-level modules.
 
@@ -10,25 +10,18 @@ Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the emb
 
 Prerequisites for PIE/source builds:
 
-- macOS (Homebrew): `brew install libuv llhttp`
-- Ubuntu 24.04: install `libuv` dev headers, then install `llhttp` from the upstream release tarball because `libllhttp-dev` is not shipped as an apt package on the tested image
+- macOS (Homebrew): `brew install libuv`
+- Debian/Ubuntu: install the development packages for `libuv`, `curl`, and OpenSSL
 
 Ubuntu 24.04 reference flow used for the release verification:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev cmake curl
-curl -L https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.1.tar.gz -o /tmp/llhttp.tar.gz
-rm -rf /tmp/llhttp-src && mkdir -p /tmp/llhttp-src
-tar -xzf /tmp/llhttp.tar.gz -C /tmp/llhttp-src --strip-components=1
-cmake -S /tmp/llhttp-src -B /tmp/llhttp-src/build -DBUILD_SHARED_LIBS=ON
-cmake --build /tmp/llhttp-src/build -j"$(nproc)"
-sudo cmake --install /tmp/llhttp-src/build
-sudo ldconfig
+sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev
 ```
 
 ```bash
-pie install kislayphp/core:0.0.9
+pie install kislayphp/core:0.0.10
 ```
 
 Automation note:
@@ -124,7 +117,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally for `0.0.9` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
+Validated locally for `0.0.10` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
@@ -146,7 +139,7 @@ Native C++-only paths remain faster than PHP-routed paths. If you need materiall
 php run-tests.php
 ```
 
-Current local release-candidate result for `0.0.9`:
+Current local release-candidate result for `0.0.10`:
 
 - `15 passed`
 - `2 skipped` (`ZTS`-only async coverage)

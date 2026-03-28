@@ -113,7 +113,6 @@ COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar \
       build-essential \
       curl \
       libcurl4-openssl-dev \
-      libllhttp-dev \
       libssl-dev \
       libuv1-dev \
       pkg-config >/tmp/apt-install.log

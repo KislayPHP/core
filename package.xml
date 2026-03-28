@@ -16,15 +16,15 @@
   </lead>
   <date>2026-03-28</date>
   <version>
-    <release>0.0.9</release>
-    <api>0.0.9</api>
+    <release>0.0.10</release>
+    <api>0.0.10</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Release 0.0.9: fix Linux request object lifecycle crash, keep the fast local runtime path, and add clean Docker benchmark coverage for NTS and ZTS.</notes>
+  <notes>Release 0.0.10: vendor llhttp release sources so PIE installs no longer require a system libllhttp package.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />
