@@ -8,6 +8,11 @@ Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the emb
 
 ## Install
 
+Prerequisites for PIE/source builds:
+
+- macOS (Homebrew): `brew install libuv llhttp`
+- Debian/Ubuntu: install the development packages for `libuv` and `llhttp`
+
 ```bash
 pie install kislayphp/core:0.0.8
 ```

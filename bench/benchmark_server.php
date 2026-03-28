@@ -5,6 +5,42 @@ if (!extension_loaded('kislayphp_extension')) {
     exit(1);
 }
 
+function kislay_bench_health($req, $res): void
+{
+    $res->send('ok');
+}
+
+function kislay_bench_plaintext($req, $res): void
+{
+    $res->send('hello from kislayphp');
+}
+
+function kislay_bench_json($req, $res): void
+{
+    $res->json([
+        'status' => 'ok',
+        'service' => 'kislay-bench',
+        'ts' => microtime(true),
+    ]);
+}
+
+function kislay_bench_async_task(): int
+{
+    return 42;
+}
+
+function kislay_bench_async($req, $res): void
+{
+    async('kislay_bench_async_task');
+    $res->send('ok');
+}
+
+function kislay_bench_file($req, $res): void
+{
+    global $bigFile;
+    $res->sendFile($bigFile, 'application/octet-stream');
+}
+
 $port = (int) (getenv('BENCH_PORT') ?: 9090);
 $host = getenv('BENCH_HOST') ?: '127.0.0.1';
 
@@ -23,32 +59,11 @@ if (!file_exists($bigFile)) {
     }
 }
 
-$app->get('/health', function ($req, $res) {
-    $res->send('ok');
-});
-
-$app->get('/plaintext', function ($req, $res) {
-    $res->send('hello from kislayphp');
-});
-
-$app->get('/json', function ($req, $res) {
-    $res->json([
-        'status' => 'ok',
-        'service' => 'kislay-bench',
-        'ts' => microtime(true),
-    ]);
-});
-
-$app->get('/async', function ($req, $res) {
-    async(function() {
-        return 42;
-    });
-    $res->send('ok');
-});
-
-$app->get('/file', function ($req, $res) use ($bigFile) {
-    $res->sendFile($bigFile, 'application/octet-stream');
-});
+$app->get('/health', 'kislay_bench_health');
+$app->get('/plaintext', 'kislay_bench_plaintext');
+$app->get('/json', 'kislay_bench_json');
+$app->get('/async', 'kislay_bench_async');
+$app->get('/file', 'kislay_bench_file');
 
 fwrite(STDOUT, "Benchmark server running on http://{$host}:{$port}\n");
 $app->listen($host, $port);

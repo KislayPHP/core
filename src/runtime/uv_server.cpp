@@ -1,4 +1,5 @@
 #include "kislay/runtime/uv_server.h"
+#include <cstring>
 #include <iostream>
 #include <sstream>
 

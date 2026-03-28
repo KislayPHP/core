@@ -12,6 +12,11 @@
 
 ## Installation
 
+Build prerequisites:
+
+- macOS (Homebrew): `brew install libuv llhttp`
+- Linux: install the development packages for `libuv` and `llhttp`
+
 ```bash
 pie install kislayphp/core:0.0.8
 ```
