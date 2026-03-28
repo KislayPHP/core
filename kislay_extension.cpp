@@ -1275,6 +1275,10 @@ static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     new (&req->parsed_body_buffer) std::string();
     new (&req->headers) std::unordered_map<std::string, std::string>();
     new (&req->attributes) std::vector<kislay::RequestAttribute>();
+    new (&req->trace_id) std::string();
+    new (&req->span_id) std::string();
+    new (&req->traceparent) std::string();
+    new (&req->tracestate) std::string();
     req->params.reserve(8);
     req->query_params.reserve(8);
     req->body_params.reserve(8);
@@ -1314,6 +1318,10 @@ static void kislay_request_free_obj(zend_object *object) {
     req->path.~basic_string();
     req->uri.~basic_string();
     req->method.~basic_string();
+    req->tracestate.~basic_string();
+    req->traceparent.~basic_string();
+    req->span_id.~basic_string();
+    req->trace_id.~basic_string();
     zend_object_std_dtor(&req->std);
 }
 

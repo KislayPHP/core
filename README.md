@@ -2,7 +2,7 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-0.0.8-orange.svg)]()
+[![Release](https://img.shields.io/badge/Release-0.0.9-orange.svg)]()
 
 Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the embedded HTTP/HTTPS server, strict segment router, request/response lifecycle, middleware, async bridge, and Promise primitives used by the higher-level modules.
 
@@ -14,7 +14,7 @@ Prerequisites for PIE/source builds:
 - Debian/Ubuntu: install the development packages for `libuv` and `llhttp`
 
 ```bash
-pie install kislayphp/core:0.0.8
+pie install kislayphp/core:0.0.9
 ```
 
 ```ini
@@ -105,7 +105,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally for `0.0.8` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
+Validated locally for `0.0.9` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
@@ -127,11 +127,18 @@ Native C++-only paths remain faster than PHP-routed paths. If you need materiall
 php run-tests.php
 ```
 
-Current local release-candidate result for `0.0.8`:
+Current local release-candidate result for `0.0.9`:
 
 - `15 passed`
 - `2 skipped` (`ZTS`-only async coverage)
 - `0 failed`
+
+Clean Docker verification on PHP 8.5 RC also passed before release:
+
+- `NTS /plaintext`: `11157.65 req/s`, `0 failed`, `p95 30 ms`
+- `NTS /json`: `20085.16 req/s`, `0 failed`, `p95 9 ms`
+- `ZTS /plaintext`: `16697.28 req/s`, `0 failed`, `p95 13 ms`
+- `ZTS /json`: `25055.87 req/s`, `0 failed`, `p95 6 ms`
 
 ## Support
 

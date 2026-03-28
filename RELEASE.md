@@ -2,6 +2,12 @@
 
 ## Current release
 
+### v0.0.9 (2026-03-28)
+
+- fix Linux request-object lifecycle crash by constructing and destroying the trace strings with the rest of the request state
+- keep the single-lane fast path for the macOS/local NTS benchmark line
+- add `bench/docker_benchmark.sh` and validate clean PHP 8.5 NTS/ZTS container builds before release
+
 ### v0.0.8 (2026-03-26)
 
 - fix released source archive by tracking `uv_server` runtime files

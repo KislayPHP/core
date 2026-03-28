@@ -2,7 +2,7 @@
 
 ## Overview
 
-`kislayphp/core:0.0.8` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, and fixes the shipped source archive so the runtime tree builds cleanly through PIE:
+`kislayphp/core:0.0.9` is the current HTTP runtime release for KislayPHP. This release line keeps the hybrid async architecture, fixes the Linux request-object lifecycle crash found during clean Docker validation, and keeps the shipped source tree buildable through PIE:
 
 - strict segment router only (`/users/:id`)
 - compiled middleware chains per matched route
@@ -18,7 +18,7 @@ Build prerequisites:
 - Linux: install the development packages for `libuv` and `llhttp`
 
 ```bash
-pie install kislayphp/core:0.0.8
+pie install kislayphp/core:0.0.9
 ```
 
 ```ini
@@ -132,11 +132,9 @@ $app->setOption('gc_interval_requests', 1000);
 $app->setOption('async_threads', 4);
 ```
 
-## Release notes for 0.0.8
+## Release notes for 0.0.9
 
-- strict segment router replaces regex matching in the hot path
-- middleware contract simplified to boolean continuation
-- request parsing stays lazy and lower-allocation
-- request reset and zval cleanup hardened
-- local PHPT suite aligned with the current runtime contract
-- async self-request deadlocks replaced with explicit runtime rejection
+- construct and destroy request trace strings correctly, fixing the Linux first-request segfault in clean Docker runs
+- keep the single-lane fast path for local NTS builds while preserving the guarded async runtime model
+- add `bench/docker_benchmark.sh` so NTS and ZTS can be validated from clean PHP 8.5 containers before release
+- local PHPT suite and Docker source builds both stay green for this release line
