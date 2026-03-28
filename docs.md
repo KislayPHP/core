@@ -15,7 +15,21 @@
 Build prerequisites:
 
 - macOS (Homebrew): `brew install libuv llhttp`
-- Linux: install the development packages for `libuv` and `llhttp`
+- Ubuntu 24.04: install `libuv` dev headers and build `llhttp` from the upstream release tarball because `libllhttp-dev` is not available on the tested image
+
+Ubuntu 24.04 reference prerequisite flow:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev cmake curl
+curl -L https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.1.tar.gz -o /tmp/llhttp.tar.gz
+rm -rf /tmp/llhttp-src && mkdir -p /tmp/llhttp-src
+tar -xzf /tmp/llhttp.tar.gz -C /tmp/llhttp-src --strip-components=1
+cmake -S /tmp/llhttp-src -B /tmp/llhttp-src/build -DBUILD_SHARED_LIBS=ON
+cmake --build /tmp/llhttp-src/build -j"$(nproc)"
+sudo cmake --install /tmp/llhttp-src/build
+sudo ldconfig
+```
 
 ```bash
 pie install kislayphp/core:0.0.9
@@ -113,6 +127,11 @@ Release-candidate local results on the current NTS machine:
 - `/submit/:id`: `12974.19 req/s` at `ab -n 20000 -c 50`
 - PHPT: `15 passed`, `2 skipped`, `0 failed`
 - RSS stayed effectively flat during the sustained exact-route stress run
+
+Install verification:
+
+- macOS 8.5.2 NTS: PIE resolved, configured, and built `kislayphp/core:0.0.9`; the built module loaded successfully from the PIE work directory as `kislayphp_extension 0.0.9`
+- Ubuntu 24.04.3 LTS EC2, PHP 8.3.6 NTS: full `pie install --skip-enable-extension --no-cache kislayphp/core:0.0.9` completed successfully after installing `llhttp` from the release tarball, and the installed module loaded successfully from `php-config --extension-dir`
 
 ## Operational guidance
 

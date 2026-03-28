@@ -7,6 +7,8 @@
 - fix Linux request-object lifecycle crash by constructing and destroying the trace strings with the rest of the request state
 - keep the single-lane fast path for the macOS/local NTS benchmark line
 - add `bench/docker_benchmark.sh` and validate clean PHP 8.5 NTS/ZTS container builds before release
+- verify PIE packaging on macOS 8.5.2 NTS by loading the built module directly from the PIE work directory as `kislayphp_extension 0.0.9`
+- verify full PIE install on Ubuntu 24.04.3 LTS EC2 with PHP 8.3.6 NTS after installing `llhttp` from `release/v9.3.1.tar.gz`
 
 ### v0.0.8 (2026-03-26)
 

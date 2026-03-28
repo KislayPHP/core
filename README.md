@@ -11,11 +11,30 @@ Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the emb
 Prerequisites for PIE/source builds:
 
 - macOS (Homebrew): `brew install libuv llhttp`
-- Debian/Ubuntu: install the development packages for `libuv` and `llhttp`
+- Ubuntu 24.04: install `libuv` dev headers, then install `llhttp` from the upstream release tarball because `libllhttp-dev` is not shipped as an apt package on the tested image
+
+Ubuntu 24.04 reference flow used for the release verification:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev cmake curl
+curl -L https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.3.1.tar.gz -o /tmp/llhttp.tar.gz
+rm -rf /tmp/llhttp-src && mkdir -p /tmp/llhttp-src
+tar -xzf /tmp/llhttp.tar.gz -C /tmp/llhttp-src --strip-components=1
+cmake -S /tmp/llhttp-src -B /tmp/llhttp-src/build -DBUILD_SHARED_LIBS=ON
+cmake --build /tmp/llhttp-src/build -j"$(nproc)"
+sudo cmake --install /tmp/llhttp-src/build
+sudo ldconfig
+```
 
 ```bash
 pie install kislayphp/core:0.0.9
 ```
+
+Automation note:
+
+- in a non-interactive automation session on macOS, PIE may stop after the build step because the final copy still goes through `sudo`
+- the built module can still be validated directly from the PIE working directory before the final interactive install step
 
 ```ini
 extension=kislayphp_extension.so
