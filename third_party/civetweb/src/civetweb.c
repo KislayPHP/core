@@ -16267,18 +16267,8 @@ set_ports_option(struct mg_context *phys_ctx)
 			    portsTotal);
 		}
 #ifdef SO_REUSEPORT
-		if (setsockopt(so.sock,
-		               SOL_SOCKET,
-		               SO_REUSEPORT,
-		               (SOCK_OPT_TYPE)&on,
-		               sizeof(on))
-		    != 0) {
-
-			/* Set reuseport option, but don't abort on errors. */
-			mg_cry_ctx_internal(
-			    phys_ctx,
-			    "cannot set socket option SO_REUSEPORT (entry %i)",
-			    portsTotal);
+		if (setsockopt(so.sock, SOL_SOCKET, SO_REUSEPORT, (SOCK_OPT_TYPE)&on, sizeof(on)) != 0) {
+			mg_cry_ctx_internal(phys_ctx, "cannot set socket option SO_REUSEPORT (entry %i)", portsTotal);
 		}
 #endif
 #endif

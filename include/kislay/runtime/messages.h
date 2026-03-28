@@ -16,6 +16,7 @@ class RequestCompletion;
 
 struct HttpRequestTask {
     TaskId task_id{0};
+    std::size_t owner_lane{0};
     std::string method;
     std::string url;
     std::vector<std::string> headers;
@@ -27,10 +28,16 @@ struct HttpRequestTask {
 
 struct HttpResultMessage {
     TaskId task_id{0};
+    std::size_t owner_lane{0};
     bool ok{false};
     long response_code{0};
     std::string response_body;
     std::string error_message;
+};
+
+struct PhpTaskMessage {
+    PhpTaskId task_id{0};
+    std::size_t owner_lane{0};
 };
 
 struct RuntimeRequestMessage {
@@ -63,6 +70,101 @@ struct RuntimeResponseMessage {
     std::string traceparent;
     std::string tracestate;
     std::string request_error;
+
+    RuntimeResponseMessage() = default;
+
+    RuntimeResponseMessage(const RuntimeResponseMessage &other)
+        : task_id(other.task_id)
+        , status_code(other.status_code)
+        , body(other.body)
+        , raw_ptr(nullptr)
+        , raw_len(0)
+        , send_raw_buffer(other.send_raw_buffer)
+        , file_path(other.file_path)
+        , content_type(other.content_type)
+        , headers(other.headers)
+        , send_file(other.send_file)
+        , request_id(other.request_id)
+        , traceparent(other.traceparent)
+        , tracestate(other.tracestate)
+        , request_error(other.request_error) {
+        refresh_raw_buffer_view();
+    }
+
+    RuntimeResponseMessage &operator=(const RuntimeResponseMessage &other) {
+        if (this == &other) {
+            return *this;
+        }
+        task_id = other.task_id;
+        status_code = other.status_code;
+        body = other.body;
+        send_raw_buffer = other.send_raw_buffer;
+        file_path = other.file_path;
+        content_type = other.content_type;
+        headers = other.headers;
+        send_file = other.send_file;
+        request_id = other.request_id;
+        traceparent = other.traceparent;
+        tracestate = other.tracestate;
+        request_error = other.request_error;
+        refresh_raw_buffer_view();
+        return *this;
+    }
+
+    RuntimeResponseMessage(RuntimeResponseMessage &&other) noexcept
+        : task_id(other.task_id)
+        , status_code(other.status_code)
+        , body(std::move(other.body))
+        , raw_ptr(nullptr)
+        , raw_len(0)
+        , send_raw_buffer(other.send_raw_buffer)
+        , file_path(std::move(other.file_path))
+        , content_type(std::move(other.content_type))
+        , headers(std::move(other.headers))
+        , send_file(other.send_file)
+        , request_id(std::move(other.request_id))
+        , traceparent(std::move(other.traceparent))
+        , tracestate(std::move(other.tracestate))
+        , request_error(std::move(other.request_error)) {
+        refresh_raw_buffer_view();
+        other.clear_raw_buffer_view();
+    }
+
+    RuntimeResponseMessage &operator=(RuntimeResponseMessage &&other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        task_id = other.task_id;
+        status_code = other.status_code;
+        body = std::move(other.body);
+        send_raw_buffer = other.send_raw_buffer;
+        file_path = std::move(other.file_path);
+        content_type = std::move(other.content_type);
+        headers = std::move(other.headers);
+        send_file = other.send_file;
+        request_id = std::move(other.request_id);
+        traceparent = std::move(other.traceparent);
+        tracestate = std::move(other.tracestate);
+        request_error = std::move(other.request_error);
+        refresh_raw_buffer_view();
+        other.clear_raw_buffer_view();
+        return *this;
+    }
+
+    void refresh_raw_buffer_view() {
+        if (send_raw_buffer && !body.empty()) {
+            raw_ptr = body.c_str();
+            raw_len = body.size();
+        } else {
+            clear_raw_buffer_view();
+        }
+    }
+
+    void clear_raw_buffer_view() {
+        raw_ptr = nullptr;
+        raw_len = 0;
+        send_raw_buffer = false;
+    }
 };
 
 } // namespace kislay::runtime

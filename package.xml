@@ -14,17 +14,17 @@
     <email>kislayraj.89@gmail.com</email>
     <active>yes</active>
   </lead>
-  <date>2026-03-26</date>
+  <date>2026-03-28</date>
   <version>
-    <release>0.0.8</release>
-    <api>0.0.8</api>
+    <release>0.0.10</release>
+    <api>0.0.10</api>
   </version>
   <stability>
     <release>beta</release>
     <api>beta</api>
   </stability>
   <license>Apache-2.0</license>
-  <notes>Release 0.0.8: fix shipped source archive to include the full runtime tree and align PhpRuntimePool headers with implementation.</notes>
+  <notes>Release 0.0.10: vendor llhttp release sources so PIE installs no longer require a system libllhttp package.</notes>
   <contents>
     <dir name="/">
       <file name="*" role="src" />

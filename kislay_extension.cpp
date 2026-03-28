@@ -15,9 +15,14 @@ ZEND_TSRMLS_CACHE_EXTERN();
 }
 
 #include <curl/curl.h>
+#include <openssl/rand.h>
 #include <thread>
 #include <future>
 #include <memory>
+
+#if defined(_WIN32)
+#include <bcrypt.h>
+#endif
 
 #include "php_kislay_extension.h"
 
@@ -59,6 +64,7 @@ static thread_local std::size_t kislay_php_runtime_lane_index = 0;
 static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *retval, std::string *error_out = nullptr);
 static bool kislay_is_controller_handler(zval *handler);
 static bool kislay_normalize_controller_callable(zval *handler, zval *out);
+static void kislay_release_async_http(php_kislay_async_http_t *async_http);
 static bool kislay_jwt_verify_hs256(const std::string &header_b64, const std::string &payload_b64,
                                     const std::string &sig_b64, const std::string &secret);
 static bool kislay_jwt_parse_payload(const std::string &payload_b64, zval *out);
@@ -76,6 +82,7 @@ typedef struct _php_kislay_promise_t {
     php_kislay_app_t *owner_app;
     std::string owner_request_id;
     kislay::runtime::TaskId async_id;
+    std::size_t owner_lane;
     zend_object std;
 } php_kislay_promise_t;
 
@@ -96,21 +103,17 @@ public:
     PromiseRegistry() = default;
 
     void register_promise(TaskId task_id, php_kislay_promise_t *promise) {
-        bind_php_thread();
-        assert_php_thread();
         ZEND_ASSERT(promise != nullptr);
         GC_ADDREF(&promise->std);
         promises_[task_id] = promise;
     }
 
     php_kislay_promise_t *get_promise(TaskId task_id) {
-        assert_php_thread();
         auto it = promises_.find(task_id);
         return it == promises_.end() ? nullptr : it->second;
     }
 
     void unregister_promise(TaskId task_id) {
-        assert_php_thread();
         auto it = promises_.find(task_id);
         if (it != promises_.end()) {
             OBJ_RELEASE(&it->second->std);
@@ -121,7 +124,6 @@ public:
     }
 
     void add_fulfilled_callback(TaskId task_id, zval *callback) {
-        assert_php_thread();
         ZEND_ASSERT(callback != nullptr);
         zval copy;
         ZVAL_COPY_VALUE(&copy, callback);
@@ -131,7 +133,6 @@ public:
     }
 
     void add_rejected_callback(TaskId task_id, zval *callback) {
-        assert_php_thread();
         ZEND_ASSERT(callback != nullptr);
         zval copy;
         ZVAL_COPY_VALUE(&copy, callback);
@@ -146,7 +147,6 @@ public:
     }
 
     void dispatch(php_kislay_promise_t *promise) {
-        assert_php_thread();
         if (promise == nullptr || promise->state == PromiseState::Pending) {
             return;
         }
@@ -171,8 +171,6 @@ public:
     }
 
     void clear() {
-        bind_php_thread();
-        assert_php_thread();
         clear_callbacks(fulfilled_callbacks_);
         clear_callbacks(rejected_callbacks_);
         for (auto &entry : promises_) {
@@ -183,17 +181,6 @@ public:
 
 private:
     using CallbackMap = std::unordered_multimap<TaskId, zval>;
-
-    void bind_php_thread() {
-        if (!owner_thread_bound_) {
-            owner_thread_ = std::this_thread::get_id();
-            owner_thread_bound_ = true;
-        }
-    }
-
-    void assert_php_thread() const {
-        ZEND_ASSERT(!owner_thread_bound_ || owner_thread_ == std::this_thread::get_id());
-    }
 
     static void clear_callbacks(CallbackMap &callbacks) {
         for (auto &entry : callbacks) {
@@ -213,8 +200,6 @@ private:
     std::unordered_map<TaskId, php_kislay_promise_t *> promises_;
     CallbackMap fulfilled_callbacks_;
     CallbackMap rejected_callbacks_;
-    std::thread::id owner_thread_{};
-    bool owner_thread_bound_{false};
 };
 
 } // namespace kislay::runtime
@@ -269,8 +254,8 @@ struct KislayPHPSession {
         : active(false)
         , previous_state(kislay_php_thread_active) {
 #if defined(ZTS)
-        void ***tsrm_ls = (void ***) ts_resource(0);
-        TSRMLS_CACHE_UPDATE();
+        (void) ts_resource(0);
+        ZEND_TSRMLS_CACHE_UPDATE();
         if (php_request_startup() == SUCCESS) {
             active = true;
         }
@@ -355,6 +340,16 @@ struct KislayPendingHttpTask {
     std::string request_id;
 };
 
+struct KislayAsyncLaneState {
+    std::unique_ptr<kislay::runtime::PromiseRegistry> promise_registry;
+    std::unordered_map<kislay::runtime::TaskId, KislayPendingPhpTask> pending_php_tasks;
+    std::unordered_map<kislay::runtime::TaskId, KislayPendingHttpTask> pending_http_tasks;
+    std::unordered_map<std::string, std::size_t> pending_request_counts;
+
+    KislayAsyncLaneState()
+        : promise_registry(new kislay::runtime::PromiseRegistry()) {}
+};
+
 typedef struct _php_kislay_app_t {
     std::vector<kislay::Route> routes;
     std::vector<zval> middleware;
@@ -397,9 +392,8 @@ typedef struct _php_kislay_app_t {
     std::atomic_bool loop_active;
     int async_worker_count;
     std::unique_ptr<kislay::runtime::AsyncBridge> async_bridge;
-    std::unique_ptr<kislay::runtime::PromiseRegistry> promise_registry;
-    std::unordered_map<kislay::runtime::TaskId, KislayPendingPhpTask> pending_php_tasks;
-    std::unordered_map<kislay::runtime::TaskId, KislayPendingHttpTask> pending_http_tasks;
+    std::unique_ptr<KislayAsyncLaneState> async_single_lane;
+    std::vector<std::unique_ptr<KislayAsyncLaneState>> async_lanes;
     std::unordered_map<kislay::runtime::PhpTaskId, zval> scheduled_callbacks;
     std::atomic<std::uint64_t> next_async_id;
 
@@ -434,6 +428,200 @@ typedef struct _php_kislay_app_t {
 
     zend_object std;
 } php_kislay_app_t;
+
+static void kislay_async_lane_clear(KislayAsyncLaneState &lane) {
+    for (auto &entry : lane.pending_php_tasks) {
+        zval_ptr_dtor(&entry.second.callable);
+    }
+    lane.pending_php_tasks.clear();
+
+    for (auto &entry : lane.pending_http_tasks) {
+        kislay_release_async_http(entry.second.async_http);
+    }
+    lane.pending_http_tasks.clear();
+    lane.pending_request_counts.clear();
+
+    if (lane.promise_registry) {
+        lane.promise_registry->clear();
+    }
+}
+
+static inline void kislay_async_track_request(KislayAsyncLaneState *lane_state,
+                                              const std::string &request_id) {
+    if (lane_state == nullptr || request_id.empty()) {
+        return;
+    }
+    auto it = lane_state->pending_request_counts.find(request_id);
+    if (it == lane_state->pending_request_counts.end()) {
+        lane_state->pending_request_counts.emplace(request_id, 1);
+    } else {
+        ++it->second;
+    }
+}
+
+static inline void kislay_async_untrack_request(KislayAsyncLaneState *lane_state,
+                                                const std::string &request_id) {
+    if (lane_state == nullptr || request_id.empty()) {
+        return;
+    }
+    auto it = lane_state->pending_request_counts.find(request_id);
+    if (it == lane_state->pending_request_counts.end()) {
+        return;
+    }
+    if (it->second <= 1) {
+        lane_state->pending_request_counts.erase(it);
+    } else {
+        --it->second;
+    }
+}
+
+static void kislay_async_lanes_reset(php_kislay_app_t *app, std::size_t lane_count) {
+    if (app == nullptr) {
+        return;
+    }
+
+    if (lane_count == 0) {
+        lane_count = 1;
+    }
+
+    if (app->async_single_lane) {
+        kislay_async_lane_clear(*app->async_single_lane);
+    }
+    for (auto &lane : app->async_lanes) {
+        if (lane) {
+            kislay_async_lane_clear(*lane);
+        }
+    }
+    app->async_lanes.clear();
+
+    if (lane_count <= 1) {
+        if (!app->async_single_lane) {
+            app->async_single_lane.reset(new KislayAsyncLaneState());
+        }
+        return;
+    }
+
+    app->async_single_lane.reset();
+    app->async_lanes.reserve(lane_count);
+    for (std::size_t i = 0; i < lane_count; ++i) {
+        app->async_lanes.emplace_back(new KislayAsyncLaneState());
+    }
+}
+
+static inline bool kislay_async_is_sharded(const php_kislay_app_t *app) {
+    return app != nullptr && !app->async_lanes.empty();
+}
+
+static std::size_t kislay_async_lane_index_for_thread(const php_kislay_app_t *app) {
+    if (app == nullptr || !kislay_async_is_sharded(app)) {
+        return 0;
+    }
+    return kislay_php_runtime_lane_index < app->async_lanes.size() ? kislay_php_runtime_lane_index : 0;
+}
+
+static KislayAsyncLaneState *kislay_async_lane_state(php_kislay_app_t *app, std::size_t lane_index) {
+    if (app == nullptr) {
+        return nullptr;
+    }
+    if (!kislay_async_is_sharded(app)) {
+        return app->async_single_lane.get();
+    }
+    if (lane_index >= app->async_lanes.size()) {
+        lane_index = 0;
+    }
+    return app->async_lanes[lane_index].get();
+}
+
+static bool kislay_callable_requires_single_runtime_lane(const zval *callable) {
+    if (callable == nullptr) {
+        return false;
+    }
+
+    if (Z_TYPE_P(callable) == IS_OBJECT) {
+        return true;
+    }
+
+    if (Z_TYPE_P(callable) == IS_ARRAY) {
+        zval *first = zend_hash_index_find(Z_ARRVAL_P(callable), 0);
+        return first != nullptr && Z_TYPE_P(first) == IS_OBJECT;
+    }
+
+    return false;
+}
+
+static bool kislay_list_has_thread_unsafe_callbacks(const std::vector<zval> &callbacks,
+                                                    const char *label,
+                                                    std::string *reason_out) {
+    for (std::size_t i = 0; i < callbacks.size(); ++i) {
+        if (kislay_callable_requires_single_runtime_lane(&callbacks[i])) {
+            if (reason_out != nullptr) {
+                *reason_out = std::string(label) + "[" + std::to_string(i) + "]";
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool kislay_app_has_thread_unsafe_callbacks(php_kislay_app_t *app, std::string *reason_out) {
+    if (app == nullptr) {
+        return false;
+    }
+
+    if (kislay_list_has_thread_unsafe_callbacks(app->middleware, "middleware", reason_out) ||
+        kislay_list_has_thread_unsafe_callbacks(app->request_start_hooks, "request_start_hooks", reason_out) ||
+        kislay_list_has_thread_unsafe_callbacks(app->request_end_hooks, "request_end_hooks", reason_out) ||
+        kislay_list_has_thread_unsafe_callbacks(app->error_handlers, "error_handlers", reason_out)) {
+        return true;
+    }
+
+    if (app->has_not_found_handler && kislay_callable_requires_single_runtime_lane(&app->not_found_handler)) {
+        if (reason_out != nullptr) {
+            *reason_out = "not_found_handler";
+        }
+        return true;
+    }
+
+    if (app->has_unhandled_error_handler &&
+        kislay_callable_requires_single_runtime_lane(&app->unhandled_error_handler)) {
+        if (reason_out != nullptr) {
+            *reason_out = "unhandled_error_handler";
+        }
+        return true;
+    }
+
+    for (std::size_t i = 0; i < app->path_middleware.size(); ++i) {
+        if (kislay_callable_requires_single_runtime_lane(&app->path_middleware[i].middleware)) {
+            if (reason_out != nullptr) {
+                *reason_out = "path_middleware[" + std::to_string(i) + "]";
+            }
+            return true;
+        }
+    }
+
+    for (const auto &route : app->routes) {
+        if (kislay_callable_requires_single_runtime_lane(&route.handler)) {
+            if (reason_out != nullptr) {
+                *reason_out = "route(" + route.method + " " + route.pattern + ") handler";
+            }
+            return true;
+        }
+        if (kislay_list_has_thread_unsafe_callbacks(route.middleware,
+                                                    ("route(" + route.method + " " + route.pattern + ") middleware").c_str(),
+                                                    reason_out) ||
+            kislay_list_has_thread_unsafe_callbacks(route.compiled_middleware,
+                                                    ("route(" + route.method + " " + route.pattern + ") compiled_middleware").c_str(),
+                                                    reason_out)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static KislayAsyncLaneState *kislay_current_async_lane_state(php_kislay_app_t *app) {
+    return kislay_async_lane_state(app, kislay_async_lane_index_for_thread(app));
+}
 
 static bool kislay_parse_long_strict(const char *value, zend_long *out) {
     if (value == nullptr || *value == '\0' || out == nullptr) {
@@ -622,6 +810,7 @@ static void kislay_promise_reject(php_kislay_promise_t *promise, zval *reason);
 static void kislay_promise_dispatch(php_kislay_promise_t *promise);
 static kislay::runtime::TaskId kislay_next_async_id(php_kislay_app_t *app);
 static void kislay_run_scheduler(php_kislay_app_t *obj);
+static void kislay_async_drain_lane(php_kislay_app_t *app, std::size_t lane_index, std::size_t budget = 128);
 static void kislay_async_drain(php_kislay_app_t *app, std::size_t budget = 128);
 static bool kislay_async_has_pending_for_request(php_kislay_app_t *app, const std::string &request_id);
 static void kislay_async_wait_for_request(php_kislay_app_t *app, const std::string &request_id, zend_long timeout_ms);
@@ -696,7 +885,7 @@ static bool kislay_app_wait_loop(php_kislay_app_t *app, zend_long timeout_ms) {
             app->php_runtime_pool->mode() == kislay::runtime::PhpRuntimeMode::SingleThreadLoop) {
             app->php_runtime_pool->wait_for_activity_for(std::chrono::milliseconds(1));
         } else if (app->async_bridge && app->async_bridge->running()) {
-            app->async_bridge->wait_for_activity_for(std::chrono::milliseconds(1));
+            app->async_bridge->wait_for_activity_for(0, std::chrono::milliseconds(1));
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -714,10 +903,16 @@ static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_lo
 
     const bool parallel_requested = app->zts_parallel_enabled;
     bool enable_parallel = parallel_requested;
-    if (enable_parallel && app->async_enabled) {
-        php_error_docref(nullptr, E_WARNING,
-                         "KISLAY_ENABLE_ZTS_PARALLEL=1 is incompatible with kislay async helpers; using single PHP runtime lane");
-        enable_parallel = false;
+    if (enable_parallel) {
+        std::string unsafe_reason;
+        if (kislay_app_has_thread_unsafe_callbacks(app, &unsafe_reason)) {
+            enable_parallel = false;
+            if (app->log_enabled) {
+                std::fprintf(stderr,
+                             "[kislay] ZTS parallel runtime disabled for object-backed callback: %s\n",
+                             unsafe_reason.c_str());
+            }
+        }
     }
     const bool dedicated_background_thread = !require_wait_loop && !enable_parallel;
 
@@ -734,6 +929,7 @@ static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_lo
     config.max_requests = app->max_requests;
 
     app->php_runtime_threads = runtime_threads;
+    kislay_async_lanes_reset(app, runtime_threads);
     app->php_runtime_pool.reset(new kislay::runtime::PhpRuntimePool(
         config,
         [app](std::size_t runtime_lane,
@@ -748,7 +944,10 @@ static bool kislay_app_start_runtime(php_kislay_app_t *app, bool require_wait_lo
             app->async_bridge.reset(new kislay::runtime::AsyncBridge());
         }
         if (!app->async_bridge->running()) {
-            app->async_bridge->start(static_cast<std::size_t>(std::max(app->async_worker_count, 1)));
+            app->async_bridge->start(
+                static_cast<std::size_t>(std::max(app->async_worker_count, 1)),
+                runtime_threads
+            );
         }
         app->loop_active.store(true, std::memory_order_relaxed);
     }
@@ -1052,6 +1251,12 @@ static inline php_kislay_async_http_t *php_kislay_async_http_from_obj(zend_objec
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_async_http_t, std));
 }
 
+static void kislay_release_async_http(php_kislay_async_http_t *async_http) {
+    if (async_http != nullptr) {
+        OBJ_RELEASE(&async_http->std);
+    }
+}
+
 static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     php_kislay_request_t *req = static_cast<php_kislay_request_t *>(
         ecalloc(1, sizeof(php_kislay_request_t) + zend_object_properties_size(ce)));
@@ -1070,6 +1275,10 @@ static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     new (&req->parsed_body_buffer) std::string();
     new (&req->headers) std::unordered_map<std::string, std::string>();
     new (&req->attributes) std::vector<kislay::RequestAttribute>();
+    new (&req->trace_id) std::string();
+    new (&req->span_id) std::string();
+    new (&req->traceparent) std::string();
+    new (&req->tracestate) std::string();
     req->params.reserve(8);
     req->query_params.reserve(8);
     req->body_params.reserve(8);
@@ -1109,6 +1318,10 @@ static void kislay_request_free_obj(zend_object *object) {
     req->path.~basic_string();
     req->uri.~basic_string();
     req->method.~basic_string();
+    req->tracestate.~basic_string();
+    req->traceparent.~basic_string();
+    req->span_id.~basic_string();
+    req->trace_id.~basic_string();
     zend_object_std_dtor(&req->std);
 }
 
@@ -1222,9 +1435,9 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->async_worker_count = static_cast<int>(kislay_env_long("KISLAYPHP_ASYNC_THREADS", 1));
 
     new (&app->async_bridge) std::unique_ptr<kislay::runtime::AsyncBridge>(new kislay::runtime::AsyncBridge());
-    new (&app->promise_registry) std::unique_ptr<kislay::runtime::PromiseRegistry>(new kislay::runtime::PromiseRegistry());
-    new (&app->pending_php_tasks) std::unordered_map<kislay::runtime::TaskId, KislayPendingPhpTask>();
-    new (&app->pending_http_tasks) std::unordered_map<kislay::runtime::TaskId, KislayPendingHttpTask>();
+    new (&app->async_single_lane) std::unique_ptr<KislayAsyncLaneState>(new KislayAsyncLaneState());
+    new (&app->async_lanes) std::vector<std::unique_ptr<KislayAsyncLaneState>>();
+    kislay_async_lanes_reset(app, 1);
     new (&app->scheduled_callbacks) std::unordered_map<kislay::runtime::PhpTaskId, zval>();
     app->next_async_id.store(1, std::memory_order_relaxed);
 
@@ -1290,24 +1503,20 @@ static void kislay_app_free_obj(zend_object *object) {
         }
     }
     kislay_app_stop_server(app);
-    for (auto &entry : app->pending_php_tasks) {
-        zval_ptr_dtor(&entry.second.callable);
+    if (app->async_single_lane) {
+        kislay_async_lane_clear(*app->async_single_lane);
     }
-    app->pending_php_tasks.~unordered_map();
-    for (auto &entry : app->pending_http_tasks) {
-        if (entry.second.async_http != nullptr) {
-            OBJ_RELEASE(&entry.second.async_http->std);
+    for (auto &lane : app->async_lanes) {
+        if (lane) {
+            kislay_async_lane_clear(*lane);
         }
     }
-    app->pending_http_tasks.~unordered_map();
+    app->async_lanes.~vector();
+    app->async_single_lane.~unique_ptr();
     for (auto &entry : app->scheduled_callbacks) {
         zval_ptr_dtor(&entry.second);
     }
     app->scheduled_callbacks.~unordered_map();
-    if (app->promise_registry) {
-        app->promise_registry->clear();
-    }
-    app->promise_registry.~unique_ptr();
     app->async_bridge.~unique_ptr();
     app->php_runtime_pool.~unique_ptr();
     app->error_handlers.~vector();
@@ -1767,15 +1976,31 @@ static long long kislay_response_size_bytes(const php_kislay_response_t *res) {
 
 static std::string kislay_generate_request_id() {
     unsigned char bytes[16];
+    auto fill_random = [](unsigned char *target, size_t size) {
 #ifdef __APPLE__
-    arc4random_buf(bytes, 16);
+        arc4random_buf(target, size);
+        return true;
+#elif defined(_WIN32)
+        return BCryptGenRandom(NULL, target, static_cast<ULONG>(size), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 #else
-    {
+        if (RAND_bytes(target, static_cast<int>(size)) == 1) {
+            return true;
+        }
         int fd = ::open("/dev/urandom", O_RDONLY);
-        if (fd >= 0) { ::read(fd, bytes, 16); ::close(fd); }
-        else { for (int i = 0; i < 16; i++) bytes[i] = (unsigned char)rand(); }
-    }
+        if (fd >= 0) {
+            const ssize_t nread = ::read(fd, target, size);
+            ::close(fd);
+            if (nread == static_cast<ssize_t>(size)) {
+                return true;
+            }
+        }
+        for (size_t i = 0; i < size; ++i) {
+            target[i] = static_cast<unsigned char>(rand());
+        }
+        return false;
 #endif
+    };
+    fill_random(bytes, sizeof(bytes));
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     char uuid[37];
@@ -2678,13 +2903,21 @@ static kislay::Route *kislay_find_route(php_kislay_app_t *app,
 static std::string kislay_random_hex(size_t bytes) {
     std::string result(bytes * 2, '0');
     unsigned char buf[32] = {0};
+    if (bytes > sizeof(buf)) {
+        bytes = sizeof(buf);
+    }
 #ifdef __APPLE__
     arc4random_buf(buf, bytes);
 #elif defined(_WIN32)
-    BCryptGenRandom(NULL, buf, (ULONG)bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    BCryptGenRandom(NULL, buf, static_cast<ULONG>(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 #else
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (f) { fread(buf, 1, bytes, f); fclose(f); }
+    if (RAND_bytes(buf, static_cast<int>(bytes)) != 1) {
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (f) {
+            fread(buf, 1, bytes, f);
+            fclose(f);
+        }
+    }
 #endif
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < bytes; i++) {
@@ -2732,11 +2965,8 @@ static void kislay_capture_marshaled_response(php_kislay_request_t *req,
     }
 
     // Option 1: set raw_ptr into the now-stable response.body buffer for zero-copy mg_write
-    if (!response.body.empty()) {
-        response.raw_ptr = response.body.c_str();
-        response.raw_len = response.body.size();
-        response.send_raw_buffer = true;
-    }
+    response.send_raw_buffer = !response.body.empty();
+    response.refresh_raw_buffer_view();
 
     if (req != nullptr) {
         response.request_id = req->request_id;
@@ -2765,7 +2995,7 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     object_init_ex(&req_obj, kislay_request_ce);
     php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ(req_obj));
     kislay_request_reset_state(req);
-    req->method = kislay_to_upper(request.method);
+    req->method = std::move(request.method);
     req->uri = std::move(request.uri);
     req->path = std::move(request.route_uri);
     req->query = std::move(request.query);
@@ -3064,8 +3294,8 @@ static int kislay_begin_request(struct mg_connection *conn) {
     auto *app = static_cast<php_kislay_app_t *>(info->user_data);
     const auto request_start = std::chrono::steady_clock::now();
 
-    std::string method = info->request_method ? info->request_method : "";
-    std::string log_method = kislay_to_upper(method);
+    std::string method = kislay_to_upper(info->request_method ? info->request_method : "");
+    const std::string &log_method = method;
     std::string uri = info->local_uri ? info->local_uri : (info->request_uri ? info->request_uri : "");
     size_t query_pos = uri.find('?');
     if (query_pos != std::string::npos) {
@@ -3181,18 +3411,27 @@ static int kislay_begin_request(struct mg_connection *conn) {
         }
     }
     const bool needs_internal_request_id = app->request_id_enabled || app->async_enabled;
-    if (UNEXPECTED(needs_internal_request_id) && request.headers.find("x-correlation-id") == request.headers.end()) {
-        request.headers["x-correlation-id"] = kislay_generate_request_id();
-    }
-    if (UNEXPECTED(needs_internal_request_id) && request.headers.find("x-request-id") == request.headers.end()) {
-        request.headers["x-request-id"] = kislay_generate_request_id();
-    }
-    if (UNEXPECTED(app->trace_enabled) && request.headers.find("traceparent") == request.headers.end()) {
-        const std::string trace_id = kislay_random_hex(16);
-        const std::string span_id = kislay_random_hex(8);
-        request.headers["traceparent"] = kislay_build_traceparent(trace_id, span_id);
-    }
+    if (UNEXPECTED(needs_internal_request_id)) {
+        auto correlation_it = request.headers.find("x-correlation-id");
+        auto request_id_it = request.headers.find("x-request-id");
 
+        if (correlation_it == request.headers.end() || correlation_it->second.empty() ||
+            request_id_it == request.headers.end() || request_id_it->second.empty()) {
+            const std::string resolved_request_id =
+                (request_id_it != request.headers.end() && !request_id_it->second.empty())
+                    ? request_id_it->second
+                    : ((correlation_it != request.headers.end() && !correlation_it->second.empty())
+                        ? correlation_it->second
+                        : kislay_generate_request_id());
+
+            if (request_id_it == request.headers.end() || request_id_it->second.empty()) {
+                request.headers["x-request-id"] = resolved_request_id;
+            }
+            if (correlation_it == request.headers.end() || correlation_it->second.empty()) {
+                request.headers["x-correlation-id"] = resolved_request_id;
+            }
+        }
+    }
     if (app->php_runtime_pool == nullptr || !app->php_runtime_pool->running()) {
         mg_send_http_error(conn, 503, "PHP runtime is not running");
         return 503;
@@ -5824,16 +6063,11 @@ static bool kislay_async_http_is_self_request(const php_kislay_async_http_t *asy
 PHP_METHOD(KislayAsyncHttp, executeAsync) {
     php_kislay_async_http_t *async_http = php_kislay_async_http_from_obj(Z_OBJ_P(getThis()));
     php_kislay_app_t *app = kislay_active_app.load(std::memory_order_relaxed);
+    const std::size_t lane_index = kislay_async_lane_index_for_thread(app);
+    KislayAsyncLaneState *lane_state = kislay_async_lane_state(app, lane_index);
 
     if (!app) {
         zend_throw_exception(zend_ce_exception, "No active Kislay App found for async HTTP execution", 0);
-        return;
-    }
-    if (app->php_runtime_pool &&
-        app->php_runtime_pool->runtime_threads() > 1) {
-        zend_throw_exception(zend_ce_exception,
-                             "Async HTTP is not available when KISLAY_ENABLE_ZTS_PARALLEL=1",
-                             0);
         return;
     }
     if (app->php_runtime_pool &&
@@ -5853,13 +6087,19 @@ PHP_METHOD(KislayAsyncHttp, executeAsync) {
     php_kislay_promise_t *promise = php_kislay_promise_from_obj(Z_OBJ_P(return_value));
     promise->owner_app = app;
     promise->async_id = kislay_next_async_id(app);
+    promise->owner_lane = lane_index;
     if (kislay_active_request != nullptr) {
         promise->owner_request_id = kislay_active_request->request_id;
     }
-    app->promise_registry->register_promise(promise->async_id, promise);
+    if (lane_state == nullptr || !lane_state->promise_registry) {
+        zend_throw_exception(zend_ce_exception, "Async HTTP lane state is not initialized", 0);
+        return;
+    }
+    lane_state->promise_registry->register_promise(promise->async_id, promise);
 
     kislay::runtime::HttpRequestTask task;
     task.task_id = promise->async_id;
+    task.owner_lane = lane_index;
     task.method = async_http->method;
     task.url = async_http->url;
     task.headers = async_http->header_lines;
@@ -5871,21 +6111,28 @@ PHP_METHOD(KislayAsyncHttp, executeAsync) {
     GC_ADDREF(&async_http->std);
 
     KislayPendingHttpTask pending{async_http, promise->owner_request_id};
-    app->pending_http_tasks.emplace(promise->async_id, std::move(pending));
+    auto [pending_it, inserted] = lane_state->pending_http_tasks.emplace(promise->async_id, std::move(pending));
+    if (inserted) {
+        kislay_async_track_request(lane_state, pending_it->second.request_id);
+    }
 
     if (!app->loop_active.load(std::memory_order_relaxed)) {
         app->loop_active.store(true, std::memory_order_relaxed);
     }
     if (app->async_bridge && !app->async_bridge->running()) {
-        app->async_bridge->start(static_cast<std::size_t>(std::max(app->async_worker_count, 1)));
+        app->async_bridge->start(
+            static_cast<std::size_t>(std::max(app->async_worker_count, 1)),
+            std::max(app->php_runtime_threads, std::size_t{1})
+        );
     }
     if (!app->async_bridge || !app->async_bridge->submit_http(std::move(task))) {
-        auto it = app->pending_http_tasks.find(promise->async_id);
-        if (it != app->pending_http_tasks.end()) {
+        auto it = lane_state->pending_http_tasks.find(promise->async_id);
+        if (it != lane_state->pending_http_tasks.end()) {
+            kislay_async_untrack_request(lane_state, it->second.request_id);
             OBJ_RELEASE(&it->second.async_http->std);
-            app->pending_http_tasks.erase(it);
+            lane_state->pending_http_tasks.erase(it);
         }
-        app->promise_registry->unregister_promise(promise->async_id);
+        lane_state->promise_registry->unregister_promise(promise->async_id);
         zend_throw_exception(zend_ce_exception, "Async bridge is not running or overloaded", 0);
         return;
     }
@@ -5934,6 +6181,7 @@ static zend_object *kislay_promise_create_object(zend_class_entry *ce) {
     promise->owner_app = nullptr;
     new (&promise->owner_request_id) std::string();
     promise->async_id = 0;
+    promise->owner_lane = 0;
     promise->std.handlers = &kislay_promise_handlers;
     return &promise->std;
 }
@@ -6002,12 +6250,15 @@ PHP_METHOD(KislayPromise, then) {
 
     php_kislay_promise_t *promise = php_kislay_promise_from_obj(Z_OBJ_P(getThis()));
     if (promise->owner_app != nullptr) {
-        kislay_async_drain(promise->owner_app, 64);
+        kislay_async_drain_lane(promise->owner_app, promise->owner_lane, 64);
     }
-    if (promise->state == PromiseState::Pending && promise->owner_app != nullptr && promise->owner_app->promise_registry) {
-        promise->owner_app->promise_registry->add_fulfilled_callback(promise->async_id, on_fulfilled);
+    KislayAsyncLaneState *lane_state = promise->owner_app != nullptr
+        ? kislay_async_lane_state(promise->owner_app, promise->owner_lane)
+        : nullptr;
+    if (promise->state == PromiseState::Pending && lane_state != nullptr && lane_state->promise_registry) {
+        lane_state->promise_registry->add_fulfilled_callback(promise->async_id, on_fulfilled);
         if (on_rejected) {
-            promise->owner_app->promise_registry->add_rejected_callback(promise->async_id, on_rejected);
+            lane_state->promise_registry->add_rejected_callback(promise->async_id, on_rejected);
         }
     } else {
         if (promise->state == PromiseState::Fulfilled) {
@@ -6033,10 +6284,13 @@ PHP_METHOD(KislayPromise, catch) {
 
     php_kislay_promise_t *promise = php_kislay_promise_from_obj(Z_OBJ_P(getThis()));
     if (promise->owner_app != nullptr) {
-        kislay_async_drain(promise->owner_app, 64);
+        kislay_async_drain_lane(promise->owner_app, promise->owner_lane, 64);
     }
-    if (promise->state == PromiseState::Pending && promise->owner_app != nullptr && promise->owner_app->promise_registry) {
-        promise->owner_app->promise_registry->add_rejected_callback(promise->async_id, on_rejected);
+    KislayAsyncLaneState *lane_state = promise->owner_app != nullptr
+        ? kislay_async_lane_state(promise->owner_app, promise->owner_lane)
+        : nullptr;
+    if (promise->state == PromiseState::Pending && lane_state != nullptr && lane_state->promise_registry) {
+        lane_state->promise_registry->add_rejected_callback(promise->async_id, on_rejected);
     } else {
         if (promise->state == PromiseState::Rejected) {
             kislay_promise_invoke_callback(on_rejected, promise);
@@ -6060,10 +6314,13 @@ PHP_METHOD(KislayPromise, finally) {
     // Simplify finally as then(f, f)
     php_kislay_promise_t *promise = php_kislay_promise_from_obj(Z_OBJ_P(getThis()));
     if (promise->owner_app != nullptr) {
-        kislay_async_drain(promise->owner_app, 64);
+        kislay_async_drain_lane(promise->owner_app, promise->owner_lane, 64);
     }
-    if (promise->state == PromiseState::Pending && promise->owner_app != nullptr && promise->owner_app->promise_registry) {
-        promise->owner_app->promise_registry->add_finally_callback(promise->async_id, on_finally);
+    KislayAsyncLaneState *lane_state = promise->owner_app != nullptr
+        ? kislay_async_lane_state(promise->owner_app, promise->owner_lane)
+        : nullptr;
+    if (promise->state == PromiseState::Pending && lane_state != nullptr && lane_state->promise_registry) {
+        lane_state->promise_registry->add_finally_callback(promise->async_id, on_finally);
     } else {
         kislay_promise_invoke_callback(on_finally, promise);
     }
@@ -6075,8 +6332,11 @@ static void kislay_promise_dispatch(php_kislay_promise_t *promise) {
     if (promise == nullptr || promise->state == PromiseState::Pending) {
         return;
     }
-    if (promise->owner_app != nullptr && promise->owner_app->promise_registry) {
-        promise->owner_app->promise_registry->dispatch(promise);
+    KislayAsyncLaneState *lane_state = promise->owner_app != nullptr
+        ? kislay_async_lane_state(promise->owner_app, promise->owner_lane)
+        : nullptr;
+    if (lane_state != nullptr && lane_state->promise_registry) {
+        lane_state->promise_registry->dispatch(promise);
     }
 }
 
@@ -6098,21 +6358,18 @@ static kislay::runtime::TaskId kislay_next_async_id(php_kislay_app_t *app) {
     return app->next_async_id.fetch_add(1, std::memory_order_relaxed);
 }
 
-static bool kislay_async_has_pending_for_request(php_kislay_app_t *app, const std::string &request_id) {
+static bool kislay_async_has_pending_for_request(php_kislay_app_t *app,
+                                                 const std::string &request_id,
+                                                 std::size_t lane_index) {
     if (app == nullptr || request_id.empty()) {
         return false;
     }
-    for (const auto &entry : app->pending_php_tasks) {
-        if (entry.second.request_id == request_id) {
-            return true;
-        }
+    KislayAsyncLaneState *lane_state = kislay_async_lane_state(app, lane_index);
+    if (lane_state == nullptr) {
+        return false;
     }
-    for (const auto &entry : app->pending_http_tasks) {
-        if (entry.second.request_id == request_id) {
-            return true;
-        }
-    }
-    return false;
+    auto it = lane_state->pending_request_counts.find(request_id);
+    return it != lane_state->pending_request_counts.end() && it->second > 0;
 }
 
 static bool kislay_is_one_shot_task_complete(const php_kislay_app_t *app, kislay::runtime::PhpTaskId task_id) {
@@ -6129,14 +6386,19 @@ static bool kislay_is_one_shot_task_complete(const php_kislay_app_t *app, kislay
 }
 
 static void kislay_async_resolve_http_result(php_kislay_app_t *app, kislay::runtime::HttpResultMessage &result) {
-    auto it = app->pending_http_tasks.find(result.task_id);
-    if (it == app->pending_http_tasks.end()) {
+    KislayAsyncLaneState *lane_state = kislay_async_lane_state(app, result.owner_lane);
+    if (lane_state == nullptr) {
+        return;
+    }
+    auto it = lane_state->pending_http_tasks.find(result.task_id);
+    if (it == lane_state->pending_http_tasks.end()) {
         return;
     }
 
     KislayPendingHttpTask pending = it->second;
-    app->pending_http_tasks.erase(it);
-    php_kislay_promise_t *promise = app->promise_registry ? app->promise_registry->get_promise(result.task_id) : nullptr;
+    lane_state->pending_http_tasks.erase(it);
+    kislay_async_untrack_request(lane_state, pending.request_id);
+    php_kislay_promise_t *promise = lane_state->promise_registry ? lane_state->promise_registry->get_promise(result.task_id) : nullptr;
     if (promise == nullptr) {
         OBJ_RELEASE(&pending.async_http->std);
         return;
@@ -6155,19 +6417,27 @@ static void kislay_async_resolve_http_result(php_kislay_app_t *app, kislay::runt
     }
     zval_ptr_dtor(&settle_value);
     kislay_promise_dispatch(promise);
-    if (app->promise_registry) {
-        app->promise_registry->unregister_promise(result.task_id);
+    if (lane_state->promise_registry) {
+        lane_state->promise_registry->unregister_promise(result.task_id);
     }
 
     OBJ_RELEASE(&pending.async_http->std);
 }
 
-static void kislay_async_run_php_task(php_kislay_app_t *app, kislay::runtime::PhpTaskId task_id) {
-    auto deferred = app->pending_php_tasks.find(task_id);
-    if (deferred != app->pending_php_tasks.end()) {
+static void kislay_async_run_php_task(php_kislay_app_t *app,
+                                      std::size_t lane_index,
+                                      kislay::runtime::PhpTaskId task_id) {
+    KislayAsyncLaneState *lane_state = kislay_async_lane_state(app, lane_index);
+    if (lane_state == nullptr) {
+        return;
+    }
+
+    auto deferred = lane_state->pending_php_tasks.find(task_id);
+    if (deferred != lane_state->pending_php_tasks.end()) {
         KislayPendingPhpTask task = deferred->second;
-        app->pending_php_tasks.erase(deferred);
-        php_kislay_promise_t *promise = app->promise_registry ? app->promise_registry->get_promise(task_id) : nullptr;
+        lane_state->pending_php_tasks.erase(deferred);
+        kislay_async_untrack_request(lane_state, task.request_id);
+        php_kislay_promise_t *promise = lane_state->promise_registry ? lane_state->promise_registry->get_promise(task_id) : nullptr;
         if (promise == nullptr) {
             zval_ptr_dtor(&task.callable);
             return;
@@ -6195,8 +6465,8 @@ static void kislay_async_run_php_task(php_kislay_app_t *app, kislay::runtime::Ph
 
         zval_ptr_dtor(&task.callable);
         kislay_promise_dispatch(promise);
-        if (app->promise_registry) {
-            app->promise_registry->unregister_promise(task_id);
+        if (lane_state->promise_registry) {
+            lane_state->promise_registry->unregister_promise(task_id);
         }
         return;
     }
@@ -6217,7 +6487,7 @@ static void kislay_async_run_php_task(php_kislay_app_t *app, kislay::runtime::Ph
     }
 }
 
-static void kislay_async_drain(php_kislay_app_t *app, std::size_t budget) {
+static void kislay_async_drain_lane(php_kislay_app_t *app, std::size_t lane_index, std::size_t budget) {
     if (app == nullptr || app->async_bridge == nullptr) {
         return;
     }
@@ -6227,15 +6497,15 @@ static void kislay_async_drain(php_kislay_app_t *app, std::size_t budget) {
     while (processed < budget) {
         bool had_work = false;
 
-        kislay::runtime::PhpTaskId php_task_id = 0;
-        while (processed < budget && app->async_bridge->try_pop_php_task(php_task_id)) {
+        kislay::runtime::PhpTaskMessage php_task;
+        while (processed < budget && app->async_bridge->try_pop_php_task(lane_index, php_task)) {
             had_work = true;
             ++processed;
-            kislay_async_run_php_task(app, php_task_id);
+            kislay_async_run_php_task(app, php_task.owner_lane, php_task.task_id);
         }
 
         kislay::runtime::HttpResultMessage result;
-        while (processed < budget && app->async_bridge->try_pop_result(result)) {
+        while (processed < budget && app->async_bridge->try_pop_result(lane_index, result)) {
             had_work = true;
             ++processed;
             kislay_async_resolve_http_result(app, result);
@@ -6247,17 +6517,22 @@ static void kislay_async_drain(php_kislay_app_t *app, std::size_t budget) {
     }
 }
 
+static void kislay_async_drain(php_kislay_app_t *app, std::size_t budget) {
+    kislay_async_drain_lane(app, kislay_async_lane_index_for_thread(app), budget);
+}
+
 static void kislay_async_wait_for_request(php_kislay_app_t *app, const std::string &request_id, zend_long timeout_ms) {
     if (app == nullptr || request_id.empty()) {
         return;
     }
+    const std::size_t lane_index = kislay_async_lane_index_for_thread(app);
 
     const auto start = std::chrono::steady_clock::now();
     const auto timeout = std::chrono::milliseconds(timeout_ms >= 0 ? timeout_ms : 10000);
 
-    while (kislay_async_has_pending_for_request(app, request_id)) {
+    while (kislay_async_has_pending_for_request(app, request_id, lane_index)) {
         kislay_async_drain(app, 128);
-        if (!kislay_async_has_pending_for_request(app, request_id)) {
+        if (!kislay_async_has_pending_for_request(app, request_id, lane_index)) {
             break;
         }
 
@@ -6267,7 +6542,7 @@ static void kislay_async_wait_for_request(php_kislay_app_t *app, const std::stri
         }
 
         if (app->async_bridge != nullptr) {
-            app->async_bridge->wait_for_activity_for(std::chrono::milliseconds(10));
+            app->async_bridge->wait_for_activity_for(lane_index, std::chrono::milliseconds(10));
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
@@ -6286,15 +6561,10 @@ PHP_FUNCTION(async) {
     }
 
     php_kislay_app_t *app = kislay_active_app.load(std::memory_order_relaxed);
+    const std::size_t lane_index = kislay_async_lane_index_for_thread(app);
+    KislayAsyncLaneState *lane_state = kislay_async_lane_state(app, lane_index);
     if (!app) {
         zend_throw_exception(zend_ce_exception, "No active Kislay App found for async operation", 0);
-        return;
-    }
-    if (app->php_runtime_pool &&
-        app->php_runtime_pool->runtime_threads() > 1) {
-        zend_throw_exception(zend_ce_exception,
-                             "async() is not available when KISLAY_ENABLE_ZTS_PARALLEL=1",
-                             0);
         return;
     }
 
@@ -6302,26 +6572,46 @@ PHP_FUNCTION(async) {
     php_kislay_promise_t *promise = php_kislay_promise_from_obj(Z_OBJ_P(return_value));
     promise->owner_app = app;
     promise->async_id = kislay_next_async_id(app);
+    promise->owner_lane = lane_index;
     if (kislay_active_request != nullptr) {
         promise->owner_request_id = kislay_active_request->request_id;
     }
-    if (app->promise_registry) {
-        app->promise_registry->register_promise(promise->async_id, promise);
+    if (lane_state != nullptr && lane_state->promise_registry) {
+        lane_state->promise_registry->register_promise(promise->async_id, promise);
     }
 
     KislayPendingPhpTask task;
     ZVAL_COPY(&task.callable, task_callable);
     task.request_id = promise->owner_request_id;
-    app->pending_php_tasks.emplace(promise->async_id, std::move(task));
+    if (lane_state == nullptr) {
+        zval_ptr_dtor(&task.callable);
+        zend_throw_exception(zend_ce_exception, "Async PHP lane state is not initialized", 0);
+        RETURN_NULL();
+    }
+    auto [pending_it, inserted] = lane_state->pending_php_tasks.emplace(promise->async_id, std::move(task));
+    if (inserted) {
+        kislay_async_track_request(lane_state, pending_it->second.request_id);
+    }
 
-    if (app->async_bridge == nullptr || !app->async_bridge->schedule_php_task(promise->async_id)) {
-        auto pending_it = app->pending_php_tasks.find(promise->async_id);
-        if (pending_it != app->pending_php_tasks.end()) {
+    if (!app->loop_active.load(std::memory_order_relaxed)) {
+        app->loop_active.store(true, std::memory_order_relaxed);
+    }
+    if (app->async_bridge && !app->async_bridge->running()) {
+        app->async_bridge->start(
+            static_cast<std::size_t>(std::max(app->async_worker_count, 1)),
+            std::max(app->php_runtime_threads, std::size_t{1})
+        );
+    }
+
+    if (app->async_bridge == nullptr || !app->async_bridge->schedule_php_task(lane_index, promise->async_id)) {
+        auto pending_it = lane_state->pending_php_tasks.find(promise->async_id);
+        if (pending_it != lane_state->pending_php_tasks.end()) {
+            kislay_async_untrack_request(lane_state, pending_it->second.request_id);
             zval_ptr_dtor(&pending_it->second.callable);
-            app->pending_php_tasks.erase(pending_it);
+            lane_state->pending_php_tasks.erase(pending_it);
         }
-        if (app->promise_registry) {
-            app->promise_registry->unregister_promise(promise->async_id);
+        if (lane_state->promise_registry) {
+            lane_state->promise_registry->unregister_promise(promise->async_id);
         }
         zend_throw_exception(zend_ce_exception, "Async PHP queue is overloaded", 0);
         RETURN_NULL();
@@ -6953,7 +7243,7 @@ static void kislay_run_scheduler(php_kislay_app_t *obj) {
             if (task.type == kislay_scheduled_task::ONCE && task.fired) continue;
             if (now >= task.next_run_ms) {
                 const bool queued = obj->async_bridge != nullptr &&
-                    obj->async_bridge->schedule_php_task(task.task_id);
+                    obj->async_bridge->schedule_php_task(0, task.task_id);
                 if (!queued) {
                     continue;
                 }
