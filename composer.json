@@ -51,5 +51,10 @@
     "php-ext": {
         "extension-name": "kislayphp_extension",
         "configure-options": []
+    },
+    "autoload": {
+        "psr-4": {
+            "Kislay\\Core\\": "src/"
+        }
     }
 }

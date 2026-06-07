@@ -5,6 +5,21 @@
 
 namespace kislay::runtime {
 
+static const char* kislay_uv_status_text(int c) {
+    switch(c) {
+        case 200: return "OK"; case 201: return "Created"; case 202: return "Accepted";
+        case 204: return "No Content"; case 301: return "Moved Permanently";
+        case 302: return "Found"; case 304: return "Not Modified";
+        case 400: return "Bad Request"; case 401: return "Unauthorized";
+        case 403: return "Forbidden"; case 404: return "Not Found";
+        case 405: return "Method Not Allowed"; case 409: return "Conflict";
+        case 410: return "Gone"; case 422: return "Unprocessable Entity";
+        case 429: return "Too Many Requests"; case 500: return "Internal Server Error";
+        case 502: return "Bad Gateway"; case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout"; default: return "Unknown";
+    }
+}
+
 struct UvConnection {
     uv_tcp_t handle;
     llhttp_t parser;
@@ -118,8 +133,9 @@ int UvServer::on_message_complete(llhttp_t* parser) {
 // --- libuv callbacks ---
 
 void UvServer::on_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
-    buf->base = (char*)malloc(suggested_size);
-    buf->len = suggested_size;
+    const size_t cap = suggested_size < 65536 ? suggested_size : 65536;
+    buf->base = (char*)malloc(cap);
+    buf->len = buf->base ? cap : 0;
 }
 
 void UvServer::on_close(uv_handle_t* handle) {
@@ -142,10 +158,14 @@ void UvServer::on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) 
 
 void UvServer::on_new_connection(uv_stream_t *server_handle, int status) {
     if (status < 0) {
+#ifdef KISLAY_DEBUG
         std::cerr << "[uv-debug] New connection error: " << uv_strerror(status) << std::endl;
+#endif
         return;
     }
+#ifdef KISLAY_DEBUG
     std::cout << "[uv-debug] Accepting new connection" << std::endl;
+#endif
 
     UvServer* server = static_cast<UvServer*>(server_handle->data);
     UvConnection* conn = new UvConnection();
@@ -203,7 +223,7 @@ void UvServer::process_responses() {
         RuntimeResponseMessage& res = pair.second;
         
         std::ostringstream ss;
-        ss << "HTTP/1.1 " << res.status_code << " OK\r\n";
+        ss << "HTTP/1.1 " << res.status_code << " " << kislay_uv_status_text(res.status_code) << "\r\n";
         
         bool has_content_type = false;
         for (const auto& h : res.headers) {
@@ -248,43 +268,79 @@ UvServer::~UvServer() {
 bool UvServer::start() {
     if (running_.exchange(true)) return true;
     
+#ifdef KISLAY_DEBUG
     std::cout << "[uv-debug] Starting server on " << host_ << ":" << port_ << std::endl;
+#endif
+#ifdef KISLAY_DEBUG
     std::cout << "[uv-debug] Spawning loop thread" << std::endl;
+#endif
     
     // We must initialize the handles from the same thread that runs the loop
     // to avoid cross-thread handle management issues in libuv.
     loop_thread_ = std::thread([this]() {
         int r;
         r = uv_async_init(loop_, &async_wakeup_, on_async_wakeup);
-        if (r < 0) { std::fprintf(stderr, "[uv-debug] async_init error: %s\n", uv_strerror(r)); fflush(stderr); return; }
+        if (r < 0) {
+#ifdef KISLAY_DEBUG
+            std::fprintf(stderr, "[uv-debug] async_init error: %s\n", uv_strerror(r)); fflush(stderr);
+#endif
+            return;
+        }
         async_wakeup_.data = this;
 
         r = uv_tcp_init(loop_, &server_);
-        if (r < 0) { std::fprintf(stderr, "[uv-debug] tcp_init error: %s\n", uv_strerror(r)); fflush(stderr); return; }
+        if (r < 0) {
+#ifdef KISLAY_DEBUG
+            std::fprintf(stderr, "[uv-debug] tcp_init error: %s\n", uv_strerror(r)); fflush(stderr);
+#endif
+            return;
+        }
         server_.data = this;
-        
+
         struct sockaddr_in addr;
+#ifdef KISLAY_DEBUG
         std::fprintf(stderr, "[uv-debug] Binding to %s:%d\n", host_.c_str(), port_); fflush(stderr);
+#endif
         r = uv_ip4_addr(host_.c_str(), port_, &addr);
-        if (r < 0) { std::fprintf(stderr, "[uv-debug] ip4_addr error: %s\n", uv_strerror(r)); fflush(stderr); return; }
+        if (r < 0) {
+#ifdef KISLAY_DEBUG
+            std::fprintf(stderr, "[uv-debug] ip4_addr error: %s\n", uv_strerror(r)); fflush(stderr);
+#endif
+            return;
+        }
 
         r = uv_tcp_bind(&server_, (const struct sockaddr*)&addr, 0);
-        if (r < 0) { std::fprintf(stderr, "[uv-debug] bind error: %s\n", uv_strerror(r)); fflush(stderr); return; }
-        
+        if (r < 0) {
+#ifdef KISLAY_DEBUG
+            std::fprintf(stderr, "[uv-debug] bind error: %s\n", uv_strerror(r)); fflush(stderr);
+#endif
+            return;
+        }
+
         r = uv_listen((uv_stream_t*)&server_, 10000, on_new_connection);
-        if (r < 0) { std::fprintf(stderr, "[uv-debug] listen error: %s\n", uv_strerror(r)); fflush(stderr); return; }
+        if (r < 0) {
+#ifdef KISLAY_DEBUG
+            std::fprintf(stderr, "[uv-debug] listen error: %s\n", uv_strerror(r)); fflush(stderr);
+#endif
+            return;
+        }
 
         // Add dummy timer to keep loop alive
         uv_timer_t dummy;
         uv_timer_init(loop_, &dummy);
         uv_timer_start(&dummy, [](uv_timer_t*){}, 1000, 1000);
-
+#ifdef KISLAY_DEBUG
         std::fprintf(stderr, "[uv-debug] Loop thread started, entering uv_run. Server handle active: %d\n", uv_is_active((uv_handle_t*)&server_)); fflush(stderr);
+#endif
         r = uv_run(loop_, UV_RUN_DEFAULT);
+#ifdef KISLAY_DEBUG
         std::fprintf(stderr, "[uv-debug] uv_run returned: %d\n", r); fflush(stderr);
-        
+#endif
+
         uv_timer_stop(&dummy);
+#ifdef KISLAY_DEBUG
         std::fprintf(stderr, "[uv-debug] Loop thread exiting\n"); fflush(stderr);
+#endif
     });
     
     return true;

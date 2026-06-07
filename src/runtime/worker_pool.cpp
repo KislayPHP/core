@@ -70,8 +70,15 @@ HttpResultMessage perform_http_request(const HttpRequestTask &task) {
         }
 
         ++attempt;
+        // Non-blocking retry: sleep briefly with exponential backoff
+        // Use short sleeps with interruption checks instead of one long sleep
         if (task.retry_delay_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(task.retry_delay_ms));
+            long long remaining_ms = task.retry_delay_ms;
+            while (remaining_ms > 0) {
+                long long chunk = remaining_ms > 50 ? 50 : remaining_ms;
+                std::this_thread::sleep_for(std::chrono::milliseconds(chunk));
+                remaining_ms -= chunk;
+            }
         }
     }
 

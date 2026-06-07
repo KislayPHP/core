@@ -1140,6 +1140,10 @@ static bool kislay_app_start_server(php_kislay_app_t *app,
         option_values.push_back(key_path);
     }
 
+    // TCP_NODELAY: disable Nagle's algorithm — send small responses immediately
+    option_values.push_back("tcp_nodelay");
+    option_values.push_back("1");
+
     option_values.push_back("enable_keep_alive");
     option_values.push_back(app->enable_keep_alive ? "yes" : "no");
     if (app->enable_keep_alive && app->keep_alive_timeout_ms > 0) {
@@ -1387,7 +1391,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
         "Kislay\\Core\\App::__construct"
     );
     app->enable_keep_alive = true;
-    app->keep_alive_timeout_ms = 500; // Default 500ms for high-concurrency reuse
+    app->keep_alive_timeout_ms = 30000; // 30 s — reuse connections instead of TCP handshake per request
     app->queue_size = 2048;
     zend_long max_body = kislay_env_long("KISLAYPHP_HTTP_MAX_BODY", KISLAYPHP_EXTENSION_G(max_body));
     app->max_body_bytes = kislay_sanitize_max_body(
@@ -1593,19 +1597,64 @@ static long long kislay_now_ms() {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static std::string kislay_to_upper(const std::string &value) {
-    std::string out = value;
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::toupper(c));
-    });
+// ── ASCII lookup tables (no locale, branchless) ───────────────────────────────
+static constexpr unsigned char KISLAY_UPPER_TABLE[256] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,
+    28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,
+    53,54,55,56,57,58,59,60,61,62,63,64,
+    65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,
+    91,92,93,94,95,96,
+    65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,
+    123,124,125,126,127,
+    128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,
+    147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,
+    166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,
+    185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,
+    204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,
+    223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,
+    242,243,244,245,246,247,248,249,250,251,252,253,254,255
+};
+static constexpr unsigned char KISLAY_LOWER_TABLE[256] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,
+    28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,
+    53,54,55,56,57,58,59,60,61,62,63,64,
+    97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,
+    117,118,119,120,121,122,
+    91,92,93,94,95,96,
+    97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,
+    117,118,119,120,121,122,
+    123,124,125,126,127,
+    128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,
+    147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,
+    166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,
+    185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,
+    204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,
+    223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,
+    242,243,244,245,246,247,248,249,250,251,252,253,254,255
+};
+
+// In-place transforms — no allocation
+static inline void kislay_to_upper_inplace(std::string &s) {
+    for (auto &c : s) { c = static_cast<char>(KISLAY_UPPER_TABLE[static_cast<unsigned char>(c)]); }
+}
+static inline void kislay_to_lower_inplace(std::string &s) {
+    for (auto &c : s) { c = static_cast<char>(KISLAY_LOWER_TABLE[static_cast<unsigned char>(c)]); }
+}
+static inline std::string kislay_to_lower_copy(const char *p, std::size_t len) {
+    std::string out(p, len);
+    kislay_to_lower_inplace(out);
     return out;
 }
 
+// Keep the old signatures for callers that haven't been hot-path-optimised yet
+static std::string kislay_to_upper(const std::string &value) {
+    std::string out = value;
+    kislay_to_upper_inplace(out);
+    return out;
+}
 static std::string kislay_to_lower(const std::string &value) {
     std::string out = value;
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    kislay_to_lower_inplace(out);
     return out;
 }
 
@@ -3294,15 +3343,45 @@ static int kislay_begin_request(struct mg_connection *conn) {
     auto *app = static_cast<php_kislay_app_t *>(info->user_data);
     const auto request_start = std::chrono::steady_clock::now();
 
-    std::string method = kislay_to_upper(info->request_method ? info->request_method : "");
-    const std::string &log_method = method;
-    std::string uri = info->local_uri ? info->local_uri : (info->request_uri ? info->request_uri : "");
-    size_t query_pos = uri.find('?');
-    if (query_pos != std::string::npos) {
-        uri = uri.substr(0, query_pos);
+    // ── Zero-alloc hot-path string processing ─────────────────────────────────
+    // thread_local buffers reuse capacity across requests (assign() never
+    // shrinks, so malloc only happens once per CivetWeb worker thread).
+    thread_local std::string tl_method;
+    thread_local std::string tl_uri;
+    thread_local std::string tl_route_uri;
+    thread_local std::string tl_query;
+    thread_local std::string tl_hdr_name;
+
+    // Method — CivetWeb already uppercases; in-place transform is a safety net
+    tl_method.assign(info->request_method ? info->request_method : "");
+    kislay_to_upper_inplace(tl_method);
+
+    // URI — strip query string in-place, no substr allocation
+    const char *raw_uri = info->local_uri ? info->local_uri
+                        : (info->request_uri ? info->request_uri : "");
+    tl_uri.assign(raw_uri);
+    {
+        const size_t qpos = tl_uri.find('?');
+        if (qpos != std::string::npos) { tl_uri.resize(qpos); }
     }
-    std::string route_uri = kislay_normalize_route_path(uri);
-    std::string query = info->query_string ? info->query_string : "";
+
+    // Normalize route path in-place (add leading '/', strip trailing '/')
+    tl_route_uri.assign(tl_uri);
+    if (tl_route_uri.empty() || tl_route_uri.front() != '/') {
+        tl_route_uri.insert(tl_route_uri.begin(), '/');
+    }
+    while (tl_route_uri.size() > 1 && tl_route_uri.back() == '/') {
+        tl_route_uri.pop_back();
+    }
+
+    // Query string
+    tl_query.assign(info->query_string ? info->query_string : "");
+
+    // Use const-refs so the rest of the function compiles unchanged
+    const std::string &method    = tl_method;
+    const std::string &uri       = tl_uri;
+    const std::string &route_uri = tl_route_uri;
+    const std::string &log_method = method;
 
     if (app->cors_enabled && method == "OPTIONS") {
         mg_printf(conn, "HTTP/1.1 200 OK\r\n"
@@ -3398,16 +3477,18 @@ static int kislay_begin_request(struct mg_connection *conn) {
 
     kislay::runtime::RuntimeRequestMessage request;
     request.task_id = app->next_request_task_id.fetch_add(1, std::memory_order_relaxed);
-    request.method = method;
-    request.uri = uri;
+    request.method    = method;
+    request.uri       = uri;
     request.route_uri = route_uri;
-    request.query = query;
-    request.body = std::move(body);
+    request.query     = tl_query;
+    request.body      = std::move(body);
     request.headers.reserve(static_cast<std::size_t>(std::max(info->num_headers, 0)) + 3);
     for (int i = 0; i < info->num_headers; ++i) {
         if (info->http_headers[i].name && info->http_headers[i].value) {
-            std::string name = kislay_to_lower(info->http_headers[i].name);
-            request.headers[name] = info->http_headers[i].value;
+            // In-place lower-case reuses tl_hdr_name's capacity — no malloc per header
+            tl_hdr_name.assign(info->http_headers[i].name);
+            kislay_to_lower_inplace(tl_hdr_name);
+            request.headers[tl_hdr_name] = info->http_headers[i].value;
         }
     }
     const bool needs_internal_request_id = app->request_id_enabled || app->async_enabled;
@@ -4800,6 +4881,10 @@ PHP_METHOD(KislayApp, once) {
     RETURN_ZVAL(getThis(), 1, 0);
 }
 
+// Forward declarations — cron helpers defined later in file
+static bool kislay_cron_field_matches(const std::string &field, int value, int min_val, int max_val);
+static long long kislay_cron_next_ms(const std::string &expr, long long from_ms);
+
 PHP_METHOD(KislayApp, schedule) {
     char *cron_expr = nullptr; size_t cron_len = 0; zval *cb;
     ZEND_PARSE_PARAMETERS_START(2, 2)
@@ -4820,8 +4905,8 @@ PHP_METHOD(KislayApp, schedule) {
     task.task_id = task_id;
     task.type = kislay_scheduled_task::CRON;
     task.cron = std::string(cron_expr, cron_len);
-    task.interval_ms = 60000; // default 1 min if cron not parsed
-    task.next_run_ms = kislay_now_ms() + 60000;
+    task.interval_ms = 60000; // kept for compatibility
+    task.next_run_ms = kislay_cron_next_ms(task.cron, kislay_now_ms());
     task.fired = false;
     zval callback_copy;
     ZVAL_COPY(&callback_copy, cb);
@@ -6544,7 +6629,19 @@ static void kislay_async_wait_for_request(php_kislay_app_t *app, const std::stri
         if (app->async_bridge != nullptr) {
             app->async_bridge->wait_for_activity_for(lane_index, std::chrono::milliseconds(10));
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // Sleep until the next scheduled task deadline
+        {
+            long long sleep_ms = 1000LL;
+            long long now_check = kislay_now_ms();
+            std::lock_guard<std::mutex> lk(*app->scheduler_lock);
+            for (auto &t : app->scheduled_tasks) {
+                if (t.type == kislay_scheduled_task::ONCE && t.fired) continue;
+                long long remaining = t.next_run_ms - now_check;
+                if (remaining > 0 && remaining < sleep_ms) sleep_ms = remaining;
+            }
+            sleep_ms = sleep_ms < 1 ? 1 : sleep_ms;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        }
         }
     }
 }
@@ -7234,6 +7331,67 @@ static bool kislay_jwt_parse_payload(const std::string &payload_b64, zval *out) 
 }
 
 // ── Scheduler thread ───────────────────────────────────────────────────────────
+
+// ── Cron expression parser ─────────────────────────────────────────────────────
+static bool kislay_cron_field_matches(const std::string &field, int value, int min_val, int max_val) {
+    if (field == "*") return true;
+    if (field.find('/') != std::string::npos) {
+        int step = 1;
+        try { step = std::stoi(field.substr(field.find('/') + 1)); } catch (...) { return false; }
+        return step > 0 && ((value - min_val) % step == 0);
+    }
+    if (field.find('-') != std::string::npos) {
+        auto dash = field.find('-');
+        try {
+            int lo = std::stoi(field.substr(0, dash));
+            int hi = std::stoi(field.substr(dash + 1));
+            return value >= lo && value <= hi;
+        } catch (...) { return false; }
+    }
+    if (field.find(',') != std::string::npos) {
+        std::stringstream ss(field);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { if (std::stoi(token) == value) return true; } catch (...) {}
+        }
+        return false;
+    }
+    try { return std::stoi(field) == value; } catch (...) { return false; }
+}
+
+static long long kislay_cron_next_ms(const std::string &expr, long long from_ms) {
+    std::vector<std::string> fields;
+    std::stringstream ss(expr);
+    std::string f;
+    while (ss >> f) fields.push_back(f);
+    if (fields.size() < 5) return from_ms + 60000LL;
+
+    // Start from next minute boundary
+    time_t from_sec = (time_t)(from_ms / 1000) + 60;
+    from_sec -= from_sec % 60;
+
+    // Scan forward up to 1 year (525600 minutes)
+    for (int i = 0; i < 525600; i++) {
+        time_t t = from_sec + (time_t)(i * 60);
+        struct tm tm_val;
+#ifdef _WIN32
+        gmtime_s(&tm_val, &t);
+        struct tm *tm_ptr = &tm_val;
+#else
+        struct tm *tm_ptr = gmtime_r(&t, &tm_val);
+#endif
+        if (!tm_ptr) break;
+        if (kislay_cron_field_matches(fields[0], tm_ptr->tm_min,  0, 59) &&
+            kislay_cron_field_matches(fields[1], tm_ptr->tm_hour, 0, 23) &&
+            kislay_cron_field_matches(fields[2], tm_ptr->tm_mday, 1, 31) &&
+            kislay_cron_field_matches(fields[3], tm_ptr->tm_mon + 1, 1, 12) &&
+            kislay_cron_field_matches(fields[4], tm_ptr->tm_wday, 0, 6)) {
+            return (long long)t * 1000LL;
+        }
+    }
+    return from_ms + 60000LL;
+}
+
 static void kislay_run_scheduler(php_kislay_app_t *obj) {
     while (obj->scheduler_running.load(std::memory_order_relaxed)) {
         long long now = kislay_now_ms();
@@ -7251,13 +7409,27 @@ static void kislay_run_scheduler(php_kislay_app_t *obj) {
                     task.fired = true;
                 } else if (task.type == kislay_scheduled_task::INTERVAL) {
                     task.next_run_ms = now + task.interval_ms;
+                } else if (task.type == kislay_scheduled_task::CRON) {
+                    task.next_run_ms = kislay_cron_next_ms(task.cron, kislay_now_ms());
                 } else {
                     task.next_run_ms = now + task.interval_ms;
                 }
             }
         }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Sleep until the next scheduled task deadline
+        {
+            long long sleep_ms = 1000LL;
+            long long now_check = kislay_now_ms();
+            std::lock_guard<std::mutex> lk(*obj->scheduler_lock);
+            for (auto &t : obj->scheduled_tasks) {
+                if (t.type == kislay_scheduled_task::ONCE && t.fired) continue;
+                long long remaining = t.next_run_ms - now_check;
+                if (remaining > 0 && remaining < sleep_ms) sleep_ms = remaining;
+            }
+            sleep_ms = sleep_ms < 1 ? 1 : sleep_ms;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        }
     }
 }
 

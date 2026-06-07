@@ -17,7 +17,11 @@ public:
     ThreadSafeQueue &operator=(const ThreadSafeQueue &) = delete;
 
     void push(T value) {
-        (void) try_push(std::move(value));
+        std::unique_lock<std::mutex> lock(mutex_);
+        not_full_.wait(lock, [this]{ return closed_ || queue_.size() < max_size_ || max_size_ == 0; });
+        if (closed_) return;
+        queue_.push_back(std::move(value));
+        cv_.notify_one();
     }
 
     bool try_push(T value) {
@@ -36,28 +40,38 @@ public:
     }
 
     bool try_pop(T &value) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (queue_.empty()) {
-            return false;
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (queue_.empty()) {
+                return false;
+            }
+            value = std::move(queue_.front());
+            queue_.pop_front();
+            notify = (max_size_ > 0);
         }
-        value = std::move(queue_.front());
-        queue_.pop_front();
+        if (notify) not_full_.notify_one();
         return true;
     }
 
     template <typename Rep, typename Period>
     bool wait_pop_for(T &value, const std::chrono::duration<Rep, Period> &timeout) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, timeout, [this]() {
-            return closed_ || !queue_.empty();
-        });
+        bool notify = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, timeout, [this]() {
+                return closed_ || !queue_.empty();
+            });
 
-        if (queue_.empty()) {
-            return false;
+            if (queue_.empty()) {
+                return false;
+            }
+
+            value = std::move(queue_.front());
+            queue_.pop_front();
+            notify = (max_size_ > 0);
         }
-
-        value = std::move(queue_.front());
-        queue_.pop_front();
+        if (notify) not_full_.notify_one();
         return true;
     }
 
@@ -67,6 +81,7 @@ public:
             closed_ = true;
         }
         cv_.notify_all();
+        not_full_.notify_all();
     }
 
     bool empty() const {
@@ -82,6 +97,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable not_full_;
     std::deque<T> queue_;
     std::size_t max_size_{0};
     bool closed_{false};

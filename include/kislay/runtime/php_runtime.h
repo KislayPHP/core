@@ -38,6 +38,13 @@ public:
     void complete(RuntimeResponseMessage response);
     bool wait_for(RuntimeResponseMessage &response, std::chrono::milliseconds timeout);
 
+    // Reset for reuse (call before submitting a new request on a thread-local instance)
+    void reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready_ = false;
+        response_ = RuntimeResponseMessage{};
+    }
+
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
