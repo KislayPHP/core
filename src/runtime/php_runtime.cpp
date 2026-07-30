@@ -6,18 +6,36 @@ namespace kislay::runtime {
 void RequestCompletion::complete(RuntimeResponseMessage response) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (ready_) {
-            return;
-        }
+        if (ready_.load(std::memory_order_relaxed)) return;
         response_ = std::move(response);
-        ready_ = true;
+        // release: all stores to response_ are visible after any acquire load of ready_
+        ready_.store(true, std::memory_order_release);
     }
     cv_.notify_all();
 }
 
 bool RequestCompletion::wait_for(RuntimeResponseMessage &response, std::chrono::milliseconds timeout) {
+    // Spin-wait ~0.5–1 µs before parking on the cv.  For handlers that return
+    // quickly (plaintext, JSON, health) this avoids two OS context switches and
+    // keeps both threads in userspace, matching Go's goroutine dispatch latency.
+    for (int i = 0; i < 300; ++i) {
+        if (ready_.load(std::memory_order_acquire)) {
+            response = std::move(response_);
+            return true;
+        }
+#if defined(__x86_64__) || defined(__i386__)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        // On ARM and others: yield to the sibling hardware thread
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+
+    // Slow path: park on the condition variable for handlers that take longer.
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!cv_.wait_for(lock, timeout, [this]() { return ready_; })) {
+    if (!cv_.wait_for(lock, timeout, [this]() {
+            return ready_.load(std::memory_order_relaxed);
+        })) {
         return false;
     }
     response = std::move(response_);
@@ -98,7 +116,6 @@ std::size_t PhpRuntimePool::drain(std::size_t budget) {
         return 0;
     }
 
-    static std::mutex nts_lock;
     std::size_t processed = 0;
     while (processed < budget) {
         RuntimeRequestMessage request;
@@ -110,7 +127,7 @@ std::size_t PhpRuntimePool::drain(std::size_t budget) {
         response.task_id = request.task_id;
         if (handler_) {
             if (!config_.is_zts) {
-                std::lock_guard<std::mutex> lock(nts_lock);
+                std::lock_guard<std::mutex> lock(nts_lock_);
                 handler_(0, request, response);
             } else {
                 handler_(0, request, response);
@@ -147,7 +164,6 @@ bool PhpRuntimePool::has_pending_requests() const {
 }
 
 void PhpRuntimePool::worker_main(std::size_t runtime_index) {
-    static std::mutex nts_lock;
     std::uint32_t request_count = 0;
     while (running_.load(std::memory_order_acquire)) {
         RuntimeRequestMessage request;
@@ -159,7 +175,7 @@ void PhpRuntimePool::worker_main(std::size_t runtime_index) {
         response.task_id = request.task_id;
         if (handler_) {
             if (!config_.is_zts) {
-                std::lock_guard<std::mutex> lock(nts_lock);
+                std::lock_guard<std::mutex> lock(nts_lock_);
                 handler_(runtime_index, request, response);
             } else {
                 handler_(runtime_index, request, response);

@@ -222,22 +222,34 @@ void UvServer::process_responses() {
         UvConnection* conn = pair.first;
         RuntimeResponseMessage& res = pair.second;
         
-        std::ostringstream ss;
-        ss << "HTTP/1.1 " << res.status_code << " " << kislay_uv_status_text(res.status_code) << "\r\n";
-        
+        // Build response header into a flat std::string to avoid ostringstream overhead.
+        // Body is appended directly — no separate malloc/memcpy for header+body merge.
+        std::string raw;
+        raw.reserve(128 + res.body.size());
+        raw += "HTTP/1.1 ";
+        raw += std::to_string(res.status_code);
+        raw += ' ';
+        raw += kislay_uv_status_text(res.status_code);
+        raw += "\r\n";
+
         bool has_content_type = false;
         for (const auto& h : res.headers) {
-            ss << h.first << ": " << h.second << "\r\n";
+            raw += h.first;
+            raw += ": ";
+            raw += h.second;
+            raw += "\r\n";
             if (h.first == "content-type") has_content_type = true;
         }
         if (!has_content_type && !res.content_type.empty()) {
-            ss << "Content-Type: " << res.content_type << "\r\n";
+            raw += "Content-Type: ";
+            raw += res.content_type;
+            raw += "\r\n";
         }
-        ss << "Content-Length: " << res.body.size() << "\r\n";
-        ss << "\r\n";
-        ss << res.body;
-        
-        std::string raw = ss.str();
+        raw += "Content-Length: ";
+        raw += std::to_string(res.body.size());
+        raw += "\r\n\r\n";
+        raw += res.body;
+
         WriteReq* wr = new WriteReq();
         wr->buf.base = (char*)malloc(raw.size());
         wr->buf.len = raw.size();

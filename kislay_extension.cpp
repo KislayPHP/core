@@ -305,7 +305,7 @@ typedef struct _php_kislay_request_t {
     std::vector<kislay::RequestField> body_params;
     std::string parsed_query_buffer;
     std::string parsed_body_buffer;
-    std::unordered_map<std::string, std::string> headers;
+    kislay::runtime::FlatHeaders headers;
     std::vector<kislay::RequestAttribute> attributes;
     zval json_cache;
     bool json_cached;
@@ -425,6 +425,9 @@ typedef struct _php_kislay_app_t {
     bool has_not_found_handler;
     zval unhandled_error_handler;
     bool has_unhandled_error_handler;
+
+    // Pluggable health contributors for /actuator/health
+    std::vector<zval> health_indicators;
 
     zend_object std;
 } php_kislay_app_t;
@@ -1277,16 +1280,15 @@ static zend_object *kislay_request_create_object(zend_class_entry *ce) {
     new (&req->body_params) std::vector<kislay::RequestField>();
     new (&req->parsed_query_buffer) std::string();
     new (&req->parsed_body_buffer) std::string();
-    new (&req->headers) std::unordered_map<std::string, std::string>();
+    new (&req->headers) kislay::runtime::FlatHeaders();
     new (&req->attributes) std::vector<kislay::RequestAttribute>();
     new (&req->trace_id) std::string();
     new (&req->span_id) std::string();
     new (&req->traceparent) std::string();
     new (&req->tracestate) std::string();
-    req->params.reserve(8);
-    req->query_params.reserve(8);
-    req->body_params.reserve(8);
-    req->attributes.reserve(4);
+    // No upfront reserve — vectors start empty (capacity 0).
+    // Route matching does reserve(param_names.size()) before filling params.
+    // Query/body params grow on demand only when PHP code parses them.
     ZVAL_UNDEF(&req->json_cache);
     req->json_cached = false;
     req->json_valid = false;
@@ -1310,7 +1312,7 @@ static void kislay_request_free_obj(zend_object *object) {
         zval_ptr_dtor(&req->jwt_payload);
     }
     req->attributes.~vector();
-    req->headers.~unordered_map();
+    req->headers.~FlatHeaders();
     req->parsed_body_buffer.~basic_string();
     req->parsed_query_buffer.~basic_string();
     req->body_params.~vector();
@@ -1470,6 +1472,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->has_not_found_handler = false;
     ZVAL_UNDEF(&app->unhandled_error_handler);
     app->has_unhandled_error_handler = false;
+    new (&app->health_indicators) std::vector<zval>();
 
     app->std.handlers = &kislay_app_handlers;
     return &app->std;
@@ -1499,6 +1502,7 @@ static void kislay_app_free_obj(zend_object *object) {
         zval_ptr_dtor(&hook);
     }
     for (auto &h : app->error_handlers) { zval_ptr_dtor(&h); }
+    for (auto &h : app->health_indicators) { zval_ptr_dtor(&h); }
     if (app->has_not_found_handler) { zval_ptr_dtor(&app->not_found_handler); }
     if (app->has_unhandled_error_handler) { zval_ptr_dtor(&app->unhandled_error_handler); }
     for (auto &ctx : app->group_stack) {
@@ -3038,12 +3042,14 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     }
 
     kislay_php_runtime_lane_index = runtime_lane;
-    const auto request_start = std::chrono::steady_clock::now();
+    const auto request_start = UNEXPECTED(app->log_enabled)
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
 
     zval req_obj;
     object_init_ex(&req_obj, kislay_request_ce);
     php_kislay_request_t *req = php_kislay_request_from_obj(Z_OBJ(req_obj));
-    kislay_request_reset_state(req);
+    // No kislay_request_reset_state() here — create_object already set all fields to defaults.
     req->method = std::move(request.method);
     req->uri = std::move(request.uri);
     req->path = std::move(request.route_uri);
@@ -3140,7 +3146,8 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     zval res_obj;
     object_init_ex(&res_obj, kislay_response_ce);
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ(res_obj));
-    kislay_response_reset_state(res);
+    // No kislay_response_reset_state() here — create_object already sets body_zstr=nullptr,
+    // send_file=false, status_code=200, all strings empty.
 
     bool handled = false;
     bool run_routes = true;
@@ -3301,18 +3308,20 @@ kislay_runtime_request_done:
     kislay_capture_marshaled_response(req, res, response);
     response.request_error = request_error;
 
-    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - request_start
-    ).count();
-    kislay_log_request_record(
-        app,
-        req->method,
-        req->uri,
-        response.status_code,
-        kislay_response_size_bytes(res),
-        duration_ms,
-        request_error
-    );
+    if (UNEXPECTED(app->log_enabled)) {
+        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_start
+        ).count();
+        kislay_log_request_record(
+            app,
+            req->method,
+            req->uri,
+            response.status_code,
+            kislay_response_size_bytes(res),
+            duration_ms,
+            request_error
+        );
+    }
 
     if (!app->request_end_hooks.empty()) {
         kislay_run_hook_list(app->request_end_hooks, &req_obj, &res_obj, "request-end", nullptr);
@@ -3341,7 +3350,9 @@ static int kislay_begin_request(struct mg_connection *conn) {
     }
 
     auto *app = static_cast<php_kislay_app_t *>(info->user_data);
-    const auto request_start = std::chrono::steady_clock::now();
+    const auto request_start = UNEXPECTED(app->log_enabled)
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
 
     // ── Zero-alloc hot-path string processing ─────────────────────────────────
     // thread_local buffers reuse capacity across requests (assign() never
@@ -3393,10 +3404,12 @@ static int kislay_begin_request(struct mg_connection *conn) {
             mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
         }
         mg_printf(conn, "\r\n");
-        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - request_start
-        ).count();
-        kislay_log_request_record(app, log_method, uri, 200, 0, duration_ms, "");
+        if (UNEXPECTED(app->log_enabled)) {
+            const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - request_start
+            ).count();
+            kislay_log_request_record(app, log_method, uri, 200, 0, duration_ms, "");
+        }
         kislay_active_request = nullptr;
         return 1;
     }
@@ -3409,8 +3422,75 @@ static int kislay_begin_request(struct mg_connection *conn) {
             std::string abody;
             bool act_matched = true;
             if (apath == "/actuator/health") {
-                abody = std::string("{\"status\":\"UP\",\"uptime_ms\":") +
-                    std::to_string(kislay_now_ms() - app->start_time_ms) + "}";
+                // Call each registered health indicator; aggregate status and components.
+                //
+                // This runs on a raw civetweb worker thread (unlike normal routes, which
+                // are submitted to app->php_runtime_pool and executed on its single
+                // dedicated thread on NTS builds). call_user_function/ZVAL_* below touch
+                // Zend's memory manager directly, which has no per-thread isolation on
+                // NTS - concurrent calls from multiple worker threads corrupt the shared
+                // Zend heap and abort the whole process (zend_mm_panic), the same crash
+                // class found and fixed in the Gateway extension's proxy path. A static
+                // mutex serializes this rare, non-hot-path block so only one thread is
+                // ever inside Zend at a time from here.
+                static std::mutex actuator_health_zend_lock;
+                std::lock_guard<std::mutex> actuator_health_guard(actuator_health_zend_lock);
+                std::string overall = "UP";
+                std::string components = "";
+                bool first_comp = true;
+                for (auto &indicator : app->health_indicators) {
+                    zval retval;
+                    ZVAL_UNDEF(&retval);
+                    zval ind_copy;
+                    ZVAL_COPY(&ind_copy, &indicator);
+                    int call_ok = call_user_function(CG(function_table), nullptr, &ind_copy,
+                                                     &retval, 0, nullptr);
+                    zval_ptr_dtor(&ind_copy);
+                    if (call_ok == SUCCESS && !EG(exception) && Z_TYPE(retval) == IS_ARRAY) {
+                        std::string comp_name = "unknown";
+                        std::string comp_status = "UP";
+                        zval *name_zv = zend_hash_str_find(Z_ARRVAL(retval), "name", 4);
+                        zval *stat_zv = zend_hash_str_find(Z_ARRVAL(retval), "status", 6);
+                        if (name_zv && Z_TYPE_P(name_zv) == IS_STRING) {
+                            comp_name = std::string(Z_STRVAL_P(name_zv), Z_STRLEN_P(name_zv));
+                        }
+                        if (stat_zv && Z_TYPE_P(stat_zv) == IS_STRING) {
+                            comp_status = std::string(Z_STRVAL_P(stat_zv), Z_STRLEN_P(stat_zv));
+                        }
+                        if (comp_status != "UP") overall = "DOWN";
+                        if (!first_comp) components += ",";
+                        first_comp = false;
+                        components += "\"" + comp_name + "\":{\"status\":\"" + comp_status + "\"";
+                        zval *det_zv = zend_hash_str_find(Z_ARRVAL(retval), "details", 7);
+                        if (det_zv && Z_TYPE_P(det_zv) == IS_ARRAY) {
+                            components += ",\"details\":{";
+                            bool first_d = true;
+                            zend_string *dk; zval *dv;
+                            ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(det_zv), dk, dv) {
+                                if (!dk) continue;
+                                if (!first_d) components += ","; first_d = false;
+                                components += "\"" + std::string(ZSTR_VAL(dk), ZSTR_LEN(dk)) + "\":";
+                                if (Z_TYPE_P(dv) == IS_STRING) components += "\"" + std::string(Z_STRVAL_P(dv), Z_STRLEN_P(dv)) + "\"";
+                                else if (Z_TYPE_P(dv) == IS_LONG)  components += std::to_string(Z_LVAL_P(dv));
+                                else if (Z_TYPE_P(dv) == IS_DOUBLE) components += std::to_string(Z_DVAL_P(dv));
+                                else if (Z_TYPE_P(dv) == IS_TRUE)  components += "true";
+                                else if (Z_TYPE_P(dv) == IS_FALSE) components += "false";
+                                else components += "null";
+                            } ZEND_HASH_FOREACH_END();
+                            components += "}";
+                        }
+                        components += "}";
+                        zval_ptr_dtor(&retval);
+                    } else {
+                        overall = "DOWN";
+                        if (EG(exception)) zend_clear_exception();
+                        if (!Z_ISUNDEF(retval)) zval_ptr_dtor(&retval);
+                    }
+                }
+                abody = "{\"status\":\"" + overall + "\",\"uptime_ms\":" +
+                    std::to_string(kislay_now_ms() - app->start_time_ms);
+                if (!components.empty()) abody += ",\"components\":{" + components + "}";
+                abody += "}";
             } else if (apath == "/actuator/ping") {
                 abody = "\"pong\"";
             } else if (apath == "/actuator/info") {
@@ -3447,10 +3527,10 @@ static int kislay_begin_request(struct mg_connection *conn) {
             mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
         }
         mg_printf(conn, "\r\nPayload Too Large");
-        const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - request_start
-        ).count();
-        if (app->log_enabled) {
+        if (UNEXPECTED(app->log_enabled)) {
+            const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - request_start
+            ).count();
             std::fprintf(stderr,
                          "[kislay] time=\"%s\" request_id=\"\" request=\"%s %s\" response=\"413 17B\" duration_ms=%lld error=\"Payload Too Large\"\n",
                          kislay_now_timestamp().c_str(),
@@ -3518,8 +3598,15 @@ static int kislay_begin_request(struct mg_connection *conn) {
         return 503;
     }
 
-    auto completion = std::make_shared<kislay::runtime::RequestCompletion>();
-    request.completion = completion;
+    // Thread-local completion: reused across requests on this CivetWeb thread,
+    // eliminating one heap allocation per request.  Safe because wait_for() blocks
+    // until complete() returns, so the object is exclusively owned by this thread
+    // for the entire request lifetime.  The no-op deleter prevents double-free.
+    thread_local kislay::runtime::RequestCompletion tl_completion;
+    tl_completion.reset();
+    request.completion = std::shared_ptr<kislay::runtime::RequestCompletion>(
+        &tl_completion, [](kislay::runtime::RequestCompletion *) {});
+
     if (!app->php_runtime_pool->submit(std::move(request))) {
         mg_send_http_error(conn, 503, "PHP runtime queue is overloaded");
         return 503;
@@ -3527,7 +3614,7 @@ static int kislay_begin_request(struct mg_connection *conn) {
 
     kislay::runtime::RuntimeResponseMessage response;
     const auto timeout = std::chrono::milliseconds(app->read_timeout_ms >= 0 ? app->read_timeout_ms : 10000);
-    if (!completion->wait_for(response, timeout)) {
+    if (!tl_completion.wait_for(response, timeout)) {
         mg_send_http_error(conn, 504, "PHP runtime timed out");
         return 504;
     }
@@ -5798,6 +5885,18 @@ PHP_METHOD(KislayApp, onError) {
     app->has_unhandled_error_handler = true;
 }
 
+PHP_METHOD(KislayApp, addHealthIndicator) {
+    zval *indicator;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ZVAL(indicator)
+    ZEND_PARSE_PARAMETERS_END();
+    php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+    zval copy;
+    ZVAL_COPY(&copy, indicator);
+    app->health_indicators.push_back(copy);
+    RETURN_TRUE;
+}
+
 PHP_METHOD(KislayApp, setMemoryLimit) {
     zend_long bytes = 0;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -7255,8 +7354,9 @@ static const zend_function_entry kislay_app_methods[] = {
     PHP_ME(KislayApp, wait, arginfo_kislay_app_wait, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, isRunning, arginfo_kislay_void, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, stop, arginfo_kislay_void, ZEND_ACC_PUBLIC)
-    PHP_ME(KislayApp, onNotFound, arginfo_kislay_app_on_not_found, ZEND_ACC_PUBLIC)
-    PHP_ME(KislayApp, onError,    arginfo_kislay_app_on_not_found, ZEND_ACC_PUBLIC)
+    PHP_ME(KislayApp, onNotFound,          arginfo_kislay_app_on_not_found,    ZEND_ACC_PUBLIC)
+    PHP_ME(KislayApp, onError,             arginfo_kislay_app_on_not_found,    ZEND_ACC_PUBLIC)
+    PHP_ME(KislayApp, addHealthIndicator,  arginfo_kislay_app_request_hook,    ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, every, arginfo_kislay_app_every, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, once, arginfo_kislay_app_once, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, schedule, arginfo_kislay_app_schedule, ZEND_ACC_PUBLIC)

@@ -38,17 +38,18 @@ public:
     void complete(RuntimeResponseMessage response);
     bool wait_for(RuntimeResponseMessage &response, std::chrono::milliseconds timeout);
 
-    // Reset for reuse (call before submitting a new request on a thread-local instance)
+    // Reset for reuse on thread-local instances — call before each new submit.
     void reset() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ready_ = false;
+        ready_.store(false, std::memory_order_relaxed);
         response_ = RuntimeResponseMessage{};
     }
 
 private:
+    // Atomic flag published by complete() with release semantics.
+    // wait_for() acquires it in a spin loop before falling back to the cv.
+    std::atomic<bool> ready_{false};
     std::mutex mutex_;
     std::condition_variable cv_;
-    bool ready_{false};
     RuntimeResponseMessage response_;
 };
 
@@ -81,6 +82,7 @@ private:
     PhpRuntimeConfig config_;
     RuntimeRequestHandler handler_;
     ThreadSafeQueue<RuntimeRequestMessage> request_queue_;
+    std::mutex nts_lock_;  // Single shared NTS PHP serialisation lock — prevents concurrent PHP calls
     std::mutex wake_mutex_;
     std::condition_variable wake_cv_;
     std::atomic<std::uint64_t> wake_counter_{0};

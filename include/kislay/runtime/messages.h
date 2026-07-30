@@ -2,12 +2,70 @@
 
 #include <cstdint>
 #include <memory>
-#include <utility>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kislay::runtime {
+
+// Flat, cache-friendly alternative to unordered_map<string,string> for HTTP
+// headers.  libc++ unordered_map allocates one heap node per entry; for the
+// typical 8-20 header case that is 8-20 extra malloc calls per request.
+// FlatHeaders stores pairs in a single contiguous vector — 1 allocation for
+// the buffer instead of N+1.  find() is O(N) linear scan but for N≤20 with
+// mostly-SSO keys the memory locality beats the hash map.
+class FlatHeaders {
+public:
+    using value_type = std::pair<std::string, std::string>;
+    using container  = std::vector<value_type>;
+    using iterator       = container::iterator;
+    using const_iterator = container::const_iterator;
+
+    void reserve(std::size_t n) { data_.reserve(n); }
+    void clear()                { data_.clear(); }
+    bool empty() const          { return data_.empty(); }
+    std::size_t size() const    { return data_.size(); }
+
+    iterator       begin()        { return data_.begin(); }
+    iterator       end()          { return data_.end(); }
+    const_iterator begin()  const { return data_.begin(); }
+    const_iterator end()    const { return data_.end(); }
+    const_iterator cbegin() const { return data_.cbegin(); }
+    const_iterator cend()   const { return data_.cend(); }
+
+    iterator find(const std::string &key) {
+        for (auto it = data_.begin(); it != data_.end(); ++it)
+            if (it->first == key) return it;
+        return data_.end();
+    }
+    const_iterator find(const std::string &key) const {
+        for (auto it = data_.begin(); it != data_.end(); ++it)
+            if (it->first == key) return it;
+        return data_.end();
+    }
+
+    std::size_t count(const std::string &key) const {
+        return find(key) != data_.end() ? 1 : 0;
+    }
+
+    std::string &operator[](const std::string &key) {
+        for (auto &p : data_)
+            if (p.first == key) return p.second;
+        data_.push_back({key, {}});
+        return data_.back().second;
+    }
+
+    const std::string &at(const std::string &key) const {
+        for (const auto &p : data_)
+            if (p.first == key) return p.second;
+        throw std::out_of_range("FlatHeaders::at: key not found");
+    }
+
+private:
+    container data_;
+};
 
 using TaskId = std::uint64_t;
 using PhpTaskId = std::uint64_t;
@@ -47,7 +105,7 @@ struct RuntimeRequestMessage {
     std::string route_uri;
     std::string query;
     std::string body;
-    std::unordered_map<std::string, std::string> headers;
+    FlatHeaders headers;
     std::string remote_addr;
     std::shared_ptr<RequestCompletion> completion;
 };
