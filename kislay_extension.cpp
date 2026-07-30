@@ -3087,7 +3087,10 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     if (app->jwt_enabled) {
         bool jwt_excluded = false;
         for (const auto &pfx : app->jwt_exclude_prefixes) {
-            if (req->path.size() >= pfx.size() && req->path.substr(0, pfx.size()) == pfx) {
+            // compare(pos, len, other) does an in-place comparison — substr()+==
+            // would allocate a temporary string on every prefix check, every
+            // JWT-enabled request.
+            if (req->path.size() >= pfx.size() && req->path.compare(0, pfx.size(), pfx) == 0) {
                 jwt_excluded = true;
                 break;
             }
@@ -3097,7 +3100,7 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
             bool jwt_ok = false;
             if (auth_it != req->headers.end()) {
                 const std::string &auth_str = auth_it->second;
-                if (auth_str.size() > 7 && auth_str.substr(0, 7) == "Bearer ") {
+                if (auth_str.size() > 7 && auth_str.compare(0, 7, "Bearer ") == 0) {
                     std::string token = auth_str.substr(7);
                     auto d1 = token.find('.');
                     auto d2 = token.rfind('.');
@@ -3157,7 +3160,7 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
     if (!app->mounts.empty()) {
         for (auto &mount : app->mounts) {
             if (req->path.size() >= mount.first.size() &&
-                req->path.substr(0, mount.first.size()) == mount.first &&
+                req->path.compare(0, mount.first.size(), mount.first) == 0 &&
                 (req->path.size() == mount.first.size() || req->path[mount.first.size()] == '/')) {
                 std::string stripped = req->path.substr(mount.first.size());
                 if (stripped.empty()) {
