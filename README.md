@@ -133,6 +133,21 @@ Validated locally on the NTS reference machine with tracing, request-id generati
 
 Native C++-only paths remain faster than PHP-routed paths. If you need materially higher PHP-route throughput than this NTS single-lane model provides, the next step is ZTS multi-runtime scaling rather than loosening Zend safety.
 
+### Cross-language comparison (1.0.0)
+
+`GET /plaintext`, wrk (2 threads, 20 connections, 3s + 5s warmup), 10-core reference machine, each server using all available cores where supported. Produced by `compare/run_compare.sh`:
+
+| Framework | req/s | p50 | p99 |
+|---|---:|---:|---:|
+| Go (net/http) | 184,757 | 77µs | 368µs |
+| Node.js (native, cluster) | 182,334 | 74µs | 5.69ms |
+| Spring Boot (WebFlux + Netty) | 174,963 | 78µs | 2.09ms |
+| Node.js (native, single process) | 135,177 | 135µs | 312µs |
+| Node.js (Fastify) | 121,723 | 153µs | 342µs |
+| **KislayPHP Core** | 104,641 | 83µs | **150µs** |
+
+KislayPHP Core trails on peak throughput here — it's bound to a single dedicated PHP execution thread on NTS builds regardless of civetweb's I/O thread count (see the ZTS note above) — but its p99 is the tightest of the group, well under Go's and far under Node cluster's and Spring's multi-millisecond tail. Reproduce with `../compare/run_compare.sh` from the repo root, or the quick `../perf_smoke_test.sh` for a faster (and less statistically rigorous) sanity check.
+
 ## Production notes
 
 - Use `Discovery` for service resolution.
