@@ -2,7 +2,7 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-0.0.10-orange.svg)]()
+[![Release](https://img.shields.io/badge/Release-1.0.0-orange.svg)]()
 
 Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the embedded HTTP/HTTPS server, strict segment router, request/response lifecycle, middleware, async bridge, and Promise primitives used by the higher-level modules.
 
@@ -21,7 +21,7 @@ sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev
 ```
 
 ```bash
-pie install kislayphp/core:0.0.10
+pie install kislayphp/core:1.0.0
 ```
 
 Automation note:
@@ -43,6 +43,13 @@ phpize
 make -j4
 sudo make install
 ```
+
+## New in 1.0.0
+
+- **`Kislay\Core\AttributeRouter`** — PHP 8 attribute-based routing (`#[Route]`, `#[Get]`, `#[Post]`, etc.) for declaring routes on controller methods instead of imperative `$app->get(...)` calls.
+- **`Kislay\Core\EventPublisher`** — a typed, in-process event bus (Spring-style `ApplicationEventPublisher`) with class-hierarchy and interface-based listener dispatch.
+- Hot-path work: flat vector-backed HTTP header storage (`FlatHeaders`) cutting per-request header allocations from N to 1, an atomic request-completion flag with a short spin-wait so fast handlers avoid extra context switches, and thread-local CURL handle pooling + a non-blocking retry queue for the async HTTP client.
+- **Fixed:** `/actuator/health` could crash the whole process under concurrent load — its health-indicator invocation loop called Zend APIs directly from a raw civetweb worker thread instead of the safe single-dedicated-PHP-thread request pool, which on NTS builds could corrupt Zend's shared heap under concurrent access. Now serialized behind a mutex.
 
 ## Runtime contract
 
@@ -117,7 +124,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally for `0.0.10` on the current NTS reference machine with tracing, request-id generation, and request logging disabled:
+Validated locally on the NTS reference machine with tracing, request-id generation, and request logging disabled (figures below are from the `0.0.10` validation run; the hot-path work landing in `1.0.0` has not been re-measured against this exact `ab` command yet):
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
@@ -139,7 +146,7 @@ Native C++-only paths remain faster than PHP-routed paths. If you need materiall
 php run-tests.php
 ```
 
-Current local release-candidate result for `0.0.10`:
+Current local result (`1.0.0`):
 
 - `15 passed`
 - `2 skipped` (`ZTS`-only async coverage)
