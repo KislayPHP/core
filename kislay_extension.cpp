@@ -2566,38 +2566,65 @@ static void kislay_send_marshaled_response(struct mg_connection *conn,
         content_length = cl_override.c_str();
     }
 
-    mg_printf(conn,
-              "HTTP/1.1 %lld %s\r\n"
-              "Content-Type: %s\r\n"
-              "Content-Length: %s\r\n"
-              "Connection: keep-alive\r\n",
-              static_cast<long long>(status_code),
-              status_text,
-              content_type.c_str(),
-              content_length);
+    // Build the entire header block into one buffer and send it with a single
+    // mg_write() — each mg_printf() call is its own send() syscall, and a
+    // response with even a couple of extra headers previously meant 4-8+
+    // separate syscalls. Same fix already applied to the Gateway extension's
+    // proxy response path ("buffered proxy headers").
+    thread_local std::string resp_buf;
+    resp_buf.clear();
+    resp_buf.reserve(256);
 
-    kislay_write_cors_headers(conn, cors_enabled);
+    resp_buf += "HTTP/1.1 ";
+    resp_buf += std::to_string(static_cast<long long>(status_code));
+    resp_buf += ' ';
+    resp_buf += status_text;
+    resp_buf += "\r\nContent-Type: ";
+    resp_buf += content_type;
+    resp_buf += "\r\nContent-Length: ";
+    resp_buf += content_length;
+    resp_buf += "\r\nConnection: keep-alive\r\n";
+
+    if (cors_enabled) {
+        resp_buf += "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Private-Network: true\r\n"
+                    "Access-Control-Allow-Headers: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n";
+    }
     if (!referrer_policy.empty() && response.headers.find("referrer-policy") == response.headers.end()) {
-        mg_printf(conn, "Referrer-Policy: %s\r\n", referrer_policy.c_str());
+        resp_buf += "Referrer-Policy: ";
+        resp_buf += referrer_policy;
+        resp_buf += "\r\n";
     }
     if (emit_request_id &&
         !response.request_id.empty() &&
         response.headers.find("x-request-id") == response.headers.end()) {
-        mg_printf(conn, "X-Request-ID: %s\r\n", response.request_id.c_str());
+        resp_buf += "X-Request-ID: ";
+        resp_buf += response.request_id;
+        resp_buf += "\r\n";
     }
     for (const auto &header : response.headers) {
         if (header.first == "content-type" || header.first == "content-length") {
             continue;
         }
-        mg_printf(conn, "%s: %s\r\n", header.first.c_str(), header.second.c_str());
+        resp_buf += header.first;
+        resp_buf += ": ";
+        resp_buf += header.second;
+        resp_buf += "\r\n";
     }
     if (emit_trace && !response.traceparent.empty()) {
-        mg_printf(conn, "traceparent: %s\r\n", response.traceparent.c_str());
+        resp_buf += "traceparent: ";
+        resp_buf += response.traceparent;
+        resp_buf += "\r\n";
         if (!response.tracestate.empty()) {
-            mg_printf(conn, "tracestate: %s\r\n", response.tracestate.c_str());
+            resp_buf += "tracestate: ";
+            resp_buf += response.tracestate;
+            resp_buf += "\r\n";
         }
     }
-    mg_printf(conn, "\r\n");
+    resp_buf += "\r\n";
+    mg_write(conn, resp_buf.data(), resp_buf.size());
+
     if (stream_file) {
         mg_send_file_body(conn, response.file_path.c_str());
     } else if (body_len > 0) {
