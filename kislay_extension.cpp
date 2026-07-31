@@ -1126,10 +1126,16 @@ static bool kislay_app_start_server(php_kislay_app_t *app,
         option_values.push_back("request_timeout_ms");
         option_values.push_back(std::to_string(app->read_timeout_ms));
     }
-    if (app->max_body_bytes > 0) {
-        option_values.push_back("max_request_size");
-        option_values.push_back(std::to_string(app->max_body_bytes));
-    }
+    // Note: app->max_body_bytes is deliberately NOT forwarded to civetweb's
+    // "max_request_size" option here. That option sizes civetweb's internal
+    // per-connection read buffer (default 16384 bytes) used to parse the
+    // request line/headers — it is not an application-level body-size limit,
+    // and setting it to a small max_body_bytes value (e.g. a few hundred
+    // bytes, a perfectly reasonable app-level limit) makes the buffer too
+    // small to hold ordinary HTTP headers, causing mg_start() to fail and
+    // the whole server to refuse to start. The actual 413 check already
+    // happens independently and correctly in kislay_begin_request via
+    // info->content_length > app->max_body_bytes, before any body is read.
     if (!app->document_root.empty()) {
         option_values.push_back("document_root");
         option_values.push_back(app->document_root);
@@ -2422,105 +2428,6 @@ static void kislay_write_cors_headers(struct mg_connection *conn, bool cors_enab
               "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
 }
 
-static void kislay_write_referrer_policy_header(struct mg_connection *conn,
-                                                const php_kislay_response_t *res,
-                                                const std::string &referrer_policy) {
-    if (referrer_policy.empty()) {
-        return;
-    }
-    if (res->headers.find("referrer-policy") != res->headers.end()) {
-        return;
-    }
-    mg_printf(conn, "Referrer-Policy: %s\r\n", referrer_policy.c_str());
-}
-
-static void kislay_send_response(struct mg_connection *conn,
-                                 php_kislay_response_t *res,
-                                 bool cors_enabled,
-                                 const std::string &referrer_policy,
-                                 bool emit_request_id,
-                                 bool emit_trace) {
-    zend_long status_code = res->status_code;
-    if (!kislay_is_valid_http_status(status_code)) {
-        status_code = 500;
-    }
-    const char *status_text = kislay_status_text(status_code);
-    // Option 4: prefer body_zstr (direct zend_string pointer) over the copied std::string
-    const char *body_ptr;
-    std::size_t body_len;
-    if (res->body_zstr != nullptr) {
-        body_ptr = ZSTR_VAL(res->body_zstr);
-        body_len = ZSTR_LEN(res->body_zstr);
-    } else {
-        body_ptr = res->body.c_str();
-        body_len = res->body.size();
-    }
-    const bool stream_file = res->send_file && !res->file_path.empty();
-    std::string content_type = res->content_type.empty() ? "text/plain" : res->content_type;
-    // Option minor: stack-allocated Content-Length to avoid std::to_string heap alloc
-    char cl_buf[24];
-    snprintf(cl_buf, sizeof(cl_buf), "%zu", body_len);
-    const char *content_length = cl_buf;
-    std::string cl_override;
-    auto header_cl = res->headers.find("content-length");
-    auto header_ct = res->headers.find("content-type");
-    if (header_ct != res->headers.end()) {
-        content_type = header_ct->second;
-    }
-    if (stream_file && (header_cl == res->headers.end() || header_cl->second.empty())) {
-        struct stat file_stat;
-        if (stat(res->file_path.c_str(), &file_stat) == 0 && file_stat.st_size >= 0) {
-            snprintf(cl_buf, sizeof(cl_buf), "%zu", static_cast<size_t>(file_stat.st_size));
-        }
-    }
-    if (header_cl != res->headers.end() && !header_cl->second.empty()) {
-        cl_override = header_cl->second;
-        content_length = cl_override.c_str();
-    }
-    mg_printf(conn,
-              "HTTP/1.1 %lld %s\r\n"
-              "Content-Type: %s\r\n"
-              "Content-Length: %s\r\n"
-              "Connection: keep-alive\r\n",
-              static_cast<long long>(status_code),
-              status_text,
-              content_type.c_str(),
-              content_length);
-
-    kislay_write_cors_headers(conn, cors_enabled);
-    kislay_write_referrer_policy_header(conn, res, referrer_policy);
-
-    // Propagate X-Request-ID if available and not already set by user
-    if (emit_request_id &&
-        kislay_active_request != nullptr &&
-        !kislay_active_request->request_id.empty()
-        && res->headers.find("x-request-id") == res->headers.end()) {
-        mg_printf(conn, "X-Request-ID: %s\r\n", kislay_active_request->request_id.c_str());
-    }
-
-    for (const auto &header : res->headers) {
-        if (header.first == "content-type" || header.first == "content-length") {
-            continue;
-        }
-        mg_printf(conn, "%s: %s\r\n", header.first.c_str(), header.second.c_str());
-    }
-
-    // Propagate W3C Trace Context to client
-    if (emit_trace && kislay_active_request && !kislay_active_request->traceparent.empty()) {
-        mg_printf(conn, "traceparent: %s\r\n", kislay_active_request->traceparent.c_str());
-        if (!kislay_active_request->tracestate.empty()) {
-            mg_printf(conn, "tracestate: %s\r\n", kislay_active_request->tracestate.c_str());
-        }
-    }
-
-    mg_printf(conn, "\r\n");
-    if (stream_file) {
-        mg_send_file_body(conn, res->file_path.c_str());
-    } else if (body_len > 0) {
-        mg_write(conn, body_ptr, body_len);
-    }
-}
-
 static void kislay_send_marshaled_response(struct mg_connection *conn,
                                            const kislay::runtime::RuntimeResponseMessage &response,
                                            bool cors_enabled,
@@ -3425,15 +3332,24 @@ static int kislay_begin_request(struct mg_connection *conn) {
     const std::string &log_method = method;
 
     if (app->cors_enabled && method == "OPTIONS") {
-        mg_printf(conn, "HTTP/1.1 200 OK\r\n"
-                        "Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
-                        "Content-Length: 0\r\n"
-                        "Connection: keep-alive\r\n");
-        kislay_write_cors_headers(conn, true);
+        thread_local std::string preflight_buf;
+        preflight_buf.clear();
+        preflight_buf =
+            "HTTP/1.1 200 OK\r\n"
+            "Allow: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: keep-alive\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Private-Network: true\r\n"
+            "Access-Control-Allow-Headers: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n";
         if (!app->referrer_policy.empty()) {
-            mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
+            preflight_buf += "Referrer-Policy: ";
+            preflight_buf += app->referrer_policy;
+            preflight_buf += "\r\n";
         }
-        mg_printf(conn, "\r\n");
+        preflight_buf += "\r\n";
+        mg_write(conn, preflight_buf.data(), preflight_buf.size());
         if (UNEXPECTED(app->log_enabled)) {
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - request_start
@@ -3547,16 +3463,27 @@ static int kislay_begin_request(struct mg_connection *conn) {
     }
 
     if (app->max_body_bytes > 0 && info->content_length > static_cast<long long>(app->max_body_bytes)) {
-        mg_printf(conn,
-                  "HTTP/1.1 413 Payload Too Large\r\n"
-                  "Content-Type: text/plain\r\n"
-                  "Content-Length: 17\r\n"
-                  "Connection: keep-alive\r\n");
-        kislay_write_cors_headers(conn, app->cors_enabled);
-        if (!app->referrer_policy.empty()) {
-            mg_printf(conn, "Referrer-Policy: %s\r\n", app->referrer_policy.c_str());
+        thread_local std::string too_large_buf;
+        too_large_buf.clear();
+        too_large_buf =
+            "HTTP/1.1 413 Payload Too Large\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 17\r\n"
+            "Connection: keep-alive\r\n";
+        if (app->cors_enabled) {
+            too_large_buf +=
+                "Access-Control-Allow-Origin: *\r\n"
+                "Access-Control-Allow-Private-Network: true\r\n"
+                "Access-Control-Allow-Headers: *\r\n"
+                "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n";
         }
-        mg_printf(conn, "\r\nPayload Too Large");
+        if (!app->referrer_policy.empty()) {
+            too_large_buf += "Referrer-Policy: ";
+            too_large_buf += app->referrer_policy;
+            too_large_buf += "\r\n";
+        }
+        too_large_buf += "\r\nPayload Too Large";
+        mg_write(conn, too_large_buf.data(), too_large_buf.size());
         if (UNEXPECTED(app->log_enabled)) {
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - request_start
