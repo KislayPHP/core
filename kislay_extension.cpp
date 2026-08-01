@@ -1650,12 +1650,6 @@ static inline void kislay_to_upper_inplace(std::string &s) {
 static inline void kislay_to_lower_inplace(std::string &s) {
     for (auto &c : s) { c = static_cast<char>(KISLAY_LOWER_TABLE[static_cast<unsigned char>(c)]); }
 }
-static inline std::string kislay_to_lower_copy(const char *p, std::size_t len) {
-    std::string out(p, len);
-    kislay_to_lower_inplace(out);
-    return out;
-}
-
 // Keep the old signatures for callers that haven't been hot-path-optimised yet
 static std::string kislay_to_upper(const std::string &value) {
     std::string out = value;
@@ -1760,16 +1754,6 @@ static const char *kislay_status_text(zend_long status) {
             if (status >= 500 && status < 600) return "Server Error";
             return "Unknown";
     }
-}
-
-static std::string kislay_url_decode(const std::string &value) {
-    if (value.empty()) {
-        return "";
-    }
-    std::string out = value;
-    size_t new_len = php_url_decode(&out[0], out.size());
-    out.resize(new_len);
-    return out;
 }
 
 static const std::string_view *kislay_find_request_field(const std::vector<kislay::RequestField> &fields,
@@ -2417,17 +2401,6 @@ static void kislay_response_set_body(php_kislay_response_t *res, const char *dat
     res->body.assign(data, len);
 }
 
-static void kislay_write_cors_headers(struct mg_connection *conn, bool cors_enabled) {
-    if (!cors_enabled) {
-        return;
-    }
-    mg_printf(conn,
-              "Access-Control-Allow-Origin: *\r\n"
-              "Access-Control-Allow-Private-Network: true\r\n"
-              "Access-Control-Allow-Headers: *\r\n"
-              "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
-}
-
 static void kislay_send_marshaled_response(struct mg_connection *conn,
                                            const kislay::runtime::RuntimeResponseMessage &response,
                                            bool cors_enabled,
@@ -2722,10 +2695,6 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
         }
     }
     return true;
-}
-
-static bool kislay_run_middleware(php_kislay_app_t *app, zval *req_obj, zval *res_obj) {
-    return kislay_run_middleware_list(app->middleware, req_obj, res_obj);
 }
 
 static bool kislay_run_hook_list(
