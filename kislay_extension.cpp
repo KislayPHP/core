@@ -5657,6 +5657,19 @@ PHP_METHOD(KislayApp, listen) {
 
     if (app->worker_count > 1) {
         if (!is_worker) {
+            // kislay_app_wait_loop() above returns once *this* (master) process's
+            // running flag flips - whether from SIGTERM/SIGINT delivered to the
+            // master's own PID, or an explicit $app->stop() call. Either way the
+            // forked children are separate PIDs that never received anything, so
+            // without this they'd sit in their own wait loops forever and the
+            // waitpid() calls below would block indefinitely (confirmed via a
+            // manual repro: the master ends up parked in __wait4 at this exact
+            // line while children remain alive and unsignaled).
+            for (pid_t child_pid : children) {
+                if (kill(child_pid, SIGTERM) != 0 && errno != ESRCH) {
+                    php_error_docref(nullptr, E_WARNING, "Failed to signal worker pid %d: %s", child_pid, strerror(errno));
+                }
+            }
             for (pid_t child_pid : children) {
                 int status;
                 waitpid(child_pid, &status, 0);
