@@ -64,8 +64,24 @@ if test "$PHP_KISLAYPHP_EXTENSION" != "no"; then
     AC_MSG_WARN([libnghttp2 not found — building without HTTP/2 support])
   ])
 
-  CFLAGS="$CFLAGS -DOPENSSL_API_3_0"
-  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -std=c++17"
+  dnl -fvisibility=hidden + -DCIVETWEB_API=: civetweb.c exports ~200
+  dnl non-static C functions (mg_start, mg_read, ...) with default (public)
+  dnl visibility, explicitly re-asserted by civetweb.h's own CIVETWEB_API
+  dnl macro regardless of -fvisibility. PHP extension bundles link with
+  dnl -flat_namespace on this platform (confirmed in the actual link
+  dnl command), so when 2+ extensions that each vendor their own copy of
+  dnl civetweb.c are loaded into the same process (e.g. this extension
+  dnl alongside gateway or socket, which also embed civetweb), the dynamic
+  dnl linker can resolve a call in ONE extension's object code to the
+  dnl OTHER extension's same-named symbol - silently running the wrong
+  dnl compiled civetweb (confirmed empirically this session while
+  dnl debugging kislayphp/socket). Pre-defining CIVETWEB_API as empty
+  dnl defers to -fvisibility=hidden instead, without touching the vendored
+  dnl header/source; get_module() (PHP's own dlopen()-based loader only
+  dnl needs that one symbol) stays exported via ZEND_GET_MODULE's own
+  dnl ZEND_DLEXPORT, independent of this flag.
+  CFLAGS="$CFLAGS -DOPENSSL_API_3_0 -fvisibility=hidden -DCIVETWEB_API="
+  CXXFLAGS="$CXXFLAGS -DOPENSSL_API_3_0 -std=c++17 -fvisibility=hidden -DCIVETWEB_API="
 
   PHP_ADD_INCLUDE($srcdir/include)
   PHP_NEW_EXTENSION(kislayphp_extension, kislay_extension.cpp src/runtime/event_loop.cpp src/runtime/uv_server.cpp src/runtime/worker_pool.cpp src/runtime/async_bridge.cpp src/runtime/php_runtime.cpp third_party/civetweb/src/civetweb.c third_party/llhttp/src/api.c third_party/llhttp/src/http.c third_party/llhttp/src/llhttp.c, $ext_shared)
