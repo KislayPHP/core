@@ -252,27 +252,18 @@ struct PathMiddleware {
     zval middleware;
 };
 
+// Set for the duration of a ZTS worker thread's one-time entry-script replay
+// (see KislayPHPSession below). Checked by KislayApp::listen()/listenAsync()
+// so the replayed script's own listen() call is a no-op instead of trying to
+// re-bind a socket / re-fork / block the thread forever.
+static thread_local bool kislay_tls_script_replay_active = false;
+
 struct KislayPHPSession {
     bool active;
     bool previous_state;
-    explicit KislayPHPSession(php_kislay_app_t *app)
-        : active(false)
-        , previous_state(kislay_php_thread_active) {
-#if defined(ZTS)
-        (void) ts_resource(0);
-        ZEND_TSRMLS_CACHE_UPDATE();
-        if (php_request_startup() == SUCCESS) {
-            active = true;
-        }
-#else
-        // In NTS, the request is already started by the CLI SAPI.
-        // We just mark it as active to ensure we don't nest start/shutdown calls.
-        active = true;
-#endif
-        if (active) {
-            kislay_php_thread_active = true;
-        }
-    }
+    // Defined out-of-line, after _php_kislay_app_t's full definition, since the
+    // body (added for ZTS-parallel script replay) dereferences app-> members.
+    explicit KislayPHPSession(php_kislay_app_t *app);
 
     ~KislayPHPSession() {
 #if defined(ZTS)
@@ -397,6 +388,14 @@ typedef struct _php_kislay_app_t {
     std::string referrer_policy;
     bool is_zts_runtime;
     bool zts_parallel_enabled;
+    // Captured at listen()/listenAsync() call time via zend_get_executed_filename().
+    // Used only in ZTS-parallel mode: each new runtime worker thread gets its own,
+    // independent Zend interpreter/function table (TSRM), so a route handler
+    // registered as a plain function-name string (e.g. 'my_handler') on the
+    // thread that ran the entry script is *not* resolvable by name on any other
+    // thread until that thread has also compiled+executed the same script. See
+    // KislayPHPSession's constructor, which replays this script once per thread.
+    std::string entry_script_path;
     std::size_t php_runtime_threads;
     std::unique_ptr<kislay::runtime::PhpRuntimePool> php_runtime_pool;
     std::atomic<std::uint64_t> next_request_task_id;
@@ -444,6 +443,63 @@ typedef struct _php_kislay_app_t {
 
     zend_object std;
 } php_kislay_app_t;
+
+kislay::KislayPHPSession::KislayPHPSession(php_kislay_app_t *app)
+    : active(false)
+    , previous_state(kislay_php_thread_active) {
+#if defined(ZTS)
+    (void) ts_resource(0);
+    ZEND_TSRMLS_CACHE_UPDATE();
+    if (php_request_startup() == SUCCESS) {
+        active = true;
+    }
+    if (active && app != nullptr && app->php_runtime_pool &&
+        app->php_runtime_pool->mode() == kislay::runtime::PhpRuntimeMode::ZtsParallel &&
+        !app->entry_script_path.empty()) {
+        // Each ZTS runtime thread has its own, independent Zend interpreter
+        // (separate function/class tables via TSRM) - a route handler
+        // registered as a plain function-name string (e.g. 'my_handler') by
+        // the thread that originally ran the entry script is not resolvable
+        // by name on any other thread until that thread has also compiled
+        // and executed the same script.
+        //
+        // This has to happen on *every* request, not just once per thread:
+        // php_request_shutdown() (below, in the destructor) tears down the
+        // per-request memory arena and, with it, every non-persistent
+        // function/class this replay just declared - so a "replay once, then
+        // skip" version works for exactly one request per thread and then
+        // silently starts failing with "function not found" again. Persisting
+        // the compiled script across requests (the way opcache does, with
+        // its own persistently-allocated, refcounted op_arrays) would avoid
+        // this cost, but is a much larger, higher-risk change; replaying the
+        // full script every request is the safe, obviously-correct choice for
+        // now, at the cost of ZTS-parallel's per-request overhead approaching
+        // traditional (non-opcached) PHP-FPM rather than staying near-zero.
+        // This mirrors how PHP-FPM/mod_php workers independently execute the
+        // same script on every request: other top-level side effects in the
+        // entry script (echo, logging, outbound connections, etc.) will also
+        // happen again here, every time - expected for this mode, not a bug.
+        kislay_tls_script_replay_active = true;
+        zend_file_handle file_handle;
+        zend_stream_init_filename(&file_handle, app->entry_script_path.c_str());
+        zend_try {
+            php_execute_script(&file_handle);
+        } zend_end_try();
+        zend_destroy_file_handle(&file_handle);
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+        kislay_tls_script_replay_active = false;
+    }
+#else
+    // In NTS, the request is already started by the CLI SAPI.
+    // We just mark it as active to ensure we don't nest start/shutdown calls.
+    active = true;
+#endif
+    if (active) {
+        kislay_php_thread_active = true;
+    }
+}
 
 static void kislay_async_lane_clear(KislayAsyncLaneState &lane) {
     for (auto &entry : lane.pending_php_tasks) {
@@ -5703,6 +5759,24 @@ PHP_METHOD(KislayApp, listen) {
     }
 
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+
+    if (kislay::kislay_tls_script_replay_active) {
+        // This call is happening inside a ZTS worker thread's one-time replay
+        // of the entry script (see KislayPHPSession) - by the time execution
+        // reaches this point, everything before it in the replayed script
+        // (function/class declarations, $app->get()/use() calls, etc.) has
+        // already run against this thread's own interpreter, which is all the
+        // replay is for. This throwaway App object never actually serves
+        // requests, so there's nothing left to do here.
+        RETURN_TRUE;
+    }
+    if (app->entry_script_path.empty()) {
+        const char *executed_filename = zend_get_executed_filename();
+        if (executed_filename != nullptr) {
+            app->entry_script_path = executed_filename;
+        }
+    }
+
     if (app->ctx != nullptr) {
         zend_throw_exception(zend_ce_exception, "Server already running", 0);
         RETURN_FALSE;
@@ -5829,6 +5903,20 @@ PHP_METHOD(KislayApp, listenAsync) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_app_t *app = php_kislay_app_from_obj(Z_OBJ_P(getThis()));
+
+    if (kislay::kislay_tls_script_replay_active) {
+        // See the identical check in KislayApp::listen() - this call is
+        // happening inside a ZTS worker thread's one-time entry-script
+        // replay, so it's a no-op.
+        RETURN_TRUE;
+    }
+    if (app->entry_script_path.empty()) {
+        const char *executed_filename = zend_get_executed_filename();
+        if (executed_filename != nullptr) {
+            app->entry_script_path = executed_filename;
+        }
+    }
+
     if (!app->is_zts_runtime) {
         zend_throw_exception(zend_ce_exception, "listenAsync() requires ZTS. In NTS mode, use listen().", 0);
         RETURN_FALSE;
