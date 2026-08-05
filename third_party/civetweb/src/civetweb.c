@@ -2413,6 +2413,17 @@ struct mg_context {
 	/* Connection related */
 	int context_type; /* See CONTEXT_* above */
 
+	/* KislayPHP addition: if >= 0, set_ports_option() reuses this
+	 * already-created, already-bound-and-listening socket for the FIRST
+	 * configured listening port instead of creating/binding/listening its
+	 * own - set by mg_start_with_shared_socket(). Lets multiple forked
+	 * processes accept() on one shared, inherited fd for fair OS-level
+	 * connection distribution, instead of each process independently
+	 * SO_REUSEPORT-binding its own socket (which macOS/Darwin does not
+	 * load-balance fairly across, unlike Linux). -1 (default) means "no
+	 * shared socket, behave exactly as upstream civetweb always has". */
+	int shared_listen_fd;
+
 	struct socket *listening_sockets;
 	struct mg_pollfd *listening_socket_fds;
 	unsigned int num_listening_sockets;
@@ -16209,6 +16220,14 @@ set_ports_option(struct mg_context *phys_ctx)
 			continue;
 		}
 #endif
+		/* KislayPHP addition: reuse an already-created, already-bound(2)-
+		 * and-listen(2)'d socket for the first configured listening port
+		 * instead of creating/binding/listening our own - see
+		 * mg_start_with_shared_socket() and struct mg_context's
+		 * shared_listen_fd field. */
+		if (phys_ctx->shared_listen_fd >= 0 && portsTotal == 1) {
+			so.sock = (SOCKET)phys_ctx->shared_listen_fd;
+		} else {
 		/* Create socket. */
 		/* For a list of protocol numbers (e.g., TCP==6) see:
 		 * https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml
@@ -16419,6 +16438,7 @@ set_ports_option(struct mg_context *phys_ctx)
 			so.sock = INVALID_SOCKET;
 			continue;
 		}
+		} /* end KislayPHP shared_listen_fd else branch */
 
 		if ((getsockname(so.sock, &(usa.sa), &len) != 0)
 		    || (usa.sa.sa_family != so.lsa.sa.sa_family)) {
@@ -21255,6 +21275,9 @@ mg_start2(struct mg_init_data *init, struct mg_error_data *error)
 		return NULL;
 	}
 
+	/* KislayPHP addition: see mg_start_with_shared_socket(). */
+	ctx->shared_listen_fd = init->shared_listen_fd;
+
 	/* Random number generator will initialize at the first call */
 	ctx->dd.auth_nonce_mask =
 	    (uint64_t)get_random() ^ (uint64_t)(ptrdiff_t)(options);
@@ -21960,6 +21983,23 @@ mg_start(const struct mg_callbacks *callbacks,
 	init.callbacks = callbacks;
 	init.user_data = user_data;
 	init.configuration_options = options;
+	init.shared_listen_fd = -1;
+
+	return mg_start2(&init, NULL);
+}
+
+
+CIVETWEB_API struct mg_context *
+mg_start_with_shared_socket(const struct mg_callbacks *callbacks,
+                            void *user_data,
+                            const char **options,
+                            int shared_listen_fd)
+{
+	struct mg_init_data init = {0};
+	init.callbacks = callbacks;
+	init.user_data = user_data;
+	init.configuration_options = options;
+	init.shared_listen_fd = shared_listen_fd;
 
 	return mg_start2(&init, NULL);
 }

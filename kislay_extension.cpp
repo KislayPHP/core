@@ -52,6 +52,11 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <fcntl.h>
 
 #include "kislay/runtime/async_bridge.h"
 #include "kislay/runtime/php_runtime.h"
@@ -368,6 +373,14 @@ typedef struct _php_kislay_app_t {
     bool gc_after_request;
     int thread_count;
     int worker_count;
+    // Bind-once-before-fork socket for worker_count>1: created and
+    // listen(2)'d in PHP_METHOD(KislayApp, listen) before fork(), inherited
+    // by every forked child via the standard fd-table copy, and passed to
+    // mg_start_with_shared_socket() by every process (master + children) so
+    // they all accept() on the one shared socket instead of each
+    // independently SO_REUSEPORT-binding its own (which macOS/Darwin does
+    // not load-balance fairly across, unlike Linux). -1 = not in use.
+    int shared_listen_fd;
     zend_long read_timeout_ms;
     zend_long keep_alive_timeout_ms;
     bool enable_keep_alive;
@@ -1090,6 +1103,105 @@ static void kislay_sanitize_tls_paths(std::string *cert_path, std::string *key_p
     }
 }
 
+// Creates, binds and listen(2)'s a TCP socket for listen_addr ("host:port"
+// or just "port", matching how listen_addr is built in
+// PHP_METHOD(KislayApp, listen)), returning the fd (or -1 on failure, with
+// an E_WARNING already emitted). Called ONCE, before fork(), when
+// worker_count>1 - every forked process (master + children) then passes
+// this SAME fd (inherited via fork()'s fd-table copy) to
+// mg_start_with_shared_socket() instead of each independently
+// SO_REUSEPORT-binding its own socket. See the shared_listen_fd field
+// comment on php_kislay_app_t for why: macOS/Darwin does not fairly
+// load-balance accept()s across multiple SO_REUSEPORT-bound sockets the
+// way Linux does, so one forked process ends up receiving nearly all
+// traffic while its siblings sit idle. A single shared, inherited fd with
+// every process blocked in accept() on it sidesteps that entirely - the
+// OS fairly wakes blocked acceptors on one socket regardless of platform.
+static int kislay_create_shared_listen_socket(const std::string &listen_addr) {
+    std::string host;
+    std::string port_str;
+    size_t colon = listen_addr.find(':');
+    if (colon != std::string::npos) {
+        host = listen_addr.substr(0, colon);
+        port_str = listen_addr.substr(colon + 1);
+    } else {
+        port_str = listen_addr;
+    }
+
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    struct addrinfo *res = nullptr;
+    int gai_rc = getaddrinfo(host.empty() ? nullptr : host.c_str(), port_str.c_str(), &hints, &res);
+    if (gai_rc != 0 || res == nullptr) {
+        php_error_docref(nullptr, E_WARNING,
+                         "Kislay\\Core\\App::listen: getaddrinfo(\"%s\") failed: %s",
+                         listen_addr.c_str(), gai_strerror(gai_rc));
+        return -1;
+    }
+
+    int fd = -1;
+    for (struct addrinfo *rp = res; rp != nullptr; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+        if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+
+    if (fd < 0) {
+        php_error_docref(nullptr, E_WARNING,
+                         "Kislay\\Core\\App::listen: failed to bind shared listening socket for \"%s\": %s",
+                         listen_addr.c_str(), strerror(errno));
+        return -1;
+    }
+
+    if (listen(fd, SOMAXCONN) != 0) {
+        php_error_docref(nullptr, E_WARNING,
+                         "Kislay\\Core\\App::listen: listen() failed on shared socket for \"%s\": %s",
+                         listen_addr.c_str(), strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    // Critical for the shared-socket multi-process model: civetweb's master
+    // thread does poll()-then-accept() but never puts the LISTENING socket
+    // itself into non-blocking mode (only accepted connection sockets, in
+    // accept_new_connection()) - fine when exactly one process owns a
+    // socket, since poll() only reports readiness when a connection is
+    // truly waiting. With N processes sharing one listening socket, their
+    // poll() calls can ALL wake for the SAME single incoming connection
+    // (a "thundering herd"); only one accept() succeeds, and every other
+    // process's accept() call - on a still-blocking socket - then blocks
+    // indefinitely waiting for a connection that isn't coming, since its
+    // sibling already took it. That process's master thread is then stuck
+    // inside accept() and can't poll() again, check the stop flag, or
+    // service any other connection until some LATER, unrelated new
+    // connection happens to arrive - observed as requests stalling
+    // indefinitely under a keep-alive-heavy load (few new connections
+    // after the initial burst). Setting O_NONBLOCK here makes every
+    // process's accept() return EAGAIN/EWOULDBLOCK immediately instead of
+    // blocking when it loses the race - civetweb's accept_new_connection()
+    // already handles accept() returning INVALID_SOCKET as a no-op, so
+    // this is safe.
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    return fd;
+}
+
 static bool kislay_app_start_server_uv(php_kislay_app_t *app, const std::string &listen_addr) {
     std::string host = "0.0.0.0";
     int port = 8080;
@@ -1170,7 +1282,16 @@ static bool kislay_app_start_server(php_kislay_app_t *app,
     std::memset(&callbacks, 0, sizeof(callbacks));
     callbacks.begin_request = kislay_begin_request;
 
-    app->ctx = mg_start(&callbacks, app, options.data());
+    if (app->shared_listen_fd >= 0) {
+        // Bind-once-before-fork path (worker_count>1) - see the
+        // shared_listen_fd field comment and PHP_METHOD(KislayApp, listen).
+        // The "listening_ports" option above is still passed (civetweb
+        // needs it to know the address family/parse the port spec), but
+        // set_ports_option() will reuse this fd instead of creating its own.
+        app->ctx = mg_start_with_shared_socket(&callbacks, app, options.data(), app->shared_listen_fd);
+    } else {
+        app->ctx = mg_start(&callbacks, app, options.data());
+    }
     if (app->ctx == nullptr) {
         return false;
     }
@@ -1393,6 +1514,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     );
     app->worker_count = kislay_env_long("KISLAYPHP_WORKERS", 1);
     if (app->worker_count < 1) app->worker_count = 1;
+    app->shared_listen_fd = -1;
     app->read_timeout_ms = kislay_sanitize_timeout_ms(
         kislay_env_long("KISLAYPHP_HTTP_READ_TIMEOUT_MS", KISLAYPHP_EXTENSION_G(read_timeout_ms)),
         KISLAYPHP_EXTENSION_G(read_timeout_ms),
@@ -5620,6 +5742,18 @@ PHP_METHOD(KislayApp, listen) {
     bool is_worker = false;
     std::vector<pid_t> children;
     if (app->worker_count > 1) {
+        // Bind+listen the shared socket BEFORE fork() so every forked child
+        // inherits the same fd via the standard fork() fd-table copy - see
+        // kislay_create_shared_listen_socket()'s comment for why. Only
+        // applies to the civetweb path (mg_start_with_shared_socket); the
+        // libuv path doesn't go through civetweb at all.
+        if (app->server_type != "libuv") {
+            app->shared_listen_fd = kislay_create_shared_listen_socket(listen_addr);
+            if (app->shared_listen_fd < 0) {
+                zend_throw_exception(zend_ce_exception, "Failed to create shared listening socket for workers", 0);
+                RETURN_FALSE;
+            }
+        }
         for (int i = 0; i < app->worker_count - 1; ++i) {
             pid_t pid = fork();
             if (pid == 0) {

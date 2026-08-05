@@ -1800,7 +1800,27 @@ struct mg_init_data {
 	const struct mg_callbacks *callbacks; /* callback function pointer */
 	void *user_data;                      /* data */
 	const char **configuration_options;
+	/* KislayPHP addition: see mg_start_with_shared_socket() below. -1 means
+	 * "no shared socket" (mg_start() always sets this explicitly, so a
+	 * zero-initialized mg_init_data is never misread as fd 0). */
+	int shared_listen_fd;
 };
+
+/* KislayPHP addition: like mg_start(), but the FIRST configured listening
+ * port reuses an already-created, already-bound(2)-and-listen(2)'d socket
+ * (shared_listen_fd) instead of civetweb creating/binding/listening its
+ * own. Intended for a bind-once-before-fork() pattern: the caller creates
+ * one listening socket, forks N worker processes (which inherit the fd via
+ * the standard fork() fd-table copy), and each process calls this instead
+ * of mg_start() so all of them accept() on the one shared socket - which
+ * the OS distributes fairly across multiple blocked acceptors, unlike
+ * SO_REUSEPORT's per-platform (notably non-Linux) behavior of each process
+ * binding its own independent socket. */
+CIVETWEB_API struct mg_context *
+mg_start_with_shared_socket(const struct mg_callbacks *callbacks,
+                            void *user_data,
+                            const char **options,
+                            int shared_listen_fd);
 
 
 #if defined(MG_EXPERIMENTAL_INTERFACES)
