@@ -482,12 +482,46 @@ kislay::KislayPHPSession::KislayPHPSession(php_kislay_app_t *app)
         kislay_tls_script_replay_active = true;
         zend_file_handle file_handle;
         zend_stream_init_filename(&file_handle, app->entry_script_path.c_str());
+        // A fatal error / uncaught exception reaching the top of the
+        // replayed script is fully absorbed INSIDE php_execute_script() - it
+        // prints "Fatal error: Uncaught ..." itself, clears EG(exception),
+        // and its own internal bailout handling never propagates out to a
+        // zend_catch here (confirmed empirically: neither EG(exception) nor
+        // a zend_catch around this call ever fires for this case). The one
+        // reliable signal is php_execute_script()'s own return value - false
+        // when the script didn't run to completion.
+        bool replay_bailout = false;
+        bool replay_ok = false;
         zend_try {
-            php_execute_script(&file_handle);
+            replay_ok = php_execute_script(&file_handle);
+        } zend_catch {
+            replay_bailout = true;
         } zend_end_try();
         zend_destroy_file_handle(&file_handle);
-        if (EG(exception)) {
-            zend_clear_exception();
+        if (!replay_ok || replay_bailout || EG(exception)) {
+            // A failure here means the entry script did not finish replaying
+            // on this thread - anything declared/registered AFTER the point
+            // of failure (function/class declarations, $app->get() calls,
+            // etc.) never happened for this request, which can silently
+            // reintroduce the exact "Invalid callback ... not found" bug this
+            // replay mechanism exists to fix, with no other indication why.
+            // Logged once per thread (not once per request) since a script
+            // that fails this way fails identically on every replay - a flood
+            // of identical warnings at request rate would just be noise.
+            static thread_local bool kislay_replay_failure_logged = false;
+            if (!kislay_replay_failure_logged) {
+                kislay_replay_failure_logged = true;
+                php_error_docref(nullptr, E_WARNING,
+                                 "Kislay\\Core\\App: ZTS-parallel entry-script replay of \"%s\" "
+                                 "did not finish on this thread (see the preceding fatal error, "
+                                 "if any) - anything the script declares/registers after the "
+                                 "failing line is unavailable on this thread for every request "
+                                 "it handles (this warning is logged once per thread)",
+                                 app->entry_script_path.c_str());
+            }
+            if (EG(exception)) {
+                zend_clear_exception();
+            }
         }
         kislay_tls_script_replay_active = false;
     }
