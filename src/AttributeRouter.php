@@ -199,15 +199,51 @@ class AttributeRouter
 
     /**
      * Build a lazy handler that resolves the controller singleton via
-     * {@see Container::get()} on first invocation and invokes the named method,
+     * {@see Container::get()} on invocation and invokes the named method,
      * forwarding all request arguments.
+     *
+     * Returns a plain, named, top-level function (a string callable), not a
+     * Closure. A Closure is an object, and Kislay\Core\App's ZTS-parallel
+     * dispatch treats any object-typed route callable as thread-unsafe,
+     * silently downgrading that entire route to single-threaded dispatch
+     * (see kislay_callable_requires_single_runtime_lane() in
+     * kislay_extension.cpp) - which would make every route registered
+     * through this attribute-based router forfeit ZTS-parallel's
+     * multi-threaded dispatch, with no indication anywhere that it
+     * happened. A string callable naming a real declared function doesn't
+     * trigger that fallback, and gets re-declared correctly on every ZTS
+     * worker thread by the exact same per-request entry-script replay that
+     * already makes plain `$app->get('/x', 'my_function')` routes work
+     * across threads - register() runs as part of that replayed script, so
+     * this eval() re-runs alongside it.
      */
-    private static function buildHandler(string $class, string $methodName): callable
+    private static function buildHandler(string $class, string $methodName): string
     {
-        return static function () use ($class, $methodName) {
-            $controller = Container::get($class);
-            return $controller->$methodName(...func_get_args());
-        };
+        $fnName = self::dispatchFunctionName($class, $methodName);
+
+        if (!function_exists($fnName)) {
+            $classLiteral = var_export($class, true);
+            eval(
+                "function {$fnName}(...\$args) {"
+                . "    return \\Kislay\\Core\\Container::get({$classLiteral})->{$methodName}(...\$args);"
+                . "}"
+            );
+        }
+
+        return $fnName;
+    }
+
+    /**
+     * Deterministic function name for a (class, method) pair, so repeated
+     * calls to buildHandler() for the same route - including once per
+     * thread under ZTS-parallel's entry-script replay - resolve to the
+     * exact same declared function every time instead of accumulating
+     * throwaway duplicates.
+     */
+    private static function dispatchFunctionName(string $class, string $methodName): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_]/', '_', $class . '__' . $methodName);
+        return '__kislay_attr_route_' . $safe;
     }
 
     /**

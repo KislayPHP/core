@@ -154,6 +154,7 @@ KislayPHP Core trails on peak throughput here — it's bound to a single dedicat
 - Use `Gateway` for edge routing and rate limiting.
 - Use `Persistence` for request-scoped transaction/runtime cleanup.
 - Keep `request_id`, `trace`, and `log` off in benchmark profiles unless you are measuring those features specifically.
+- **Do not load `core`, `gateway`, and `socket` together in the same PHP process.** All three vendor their own copy of civetweb (embedded multi-threaded HTTP server) and export non-static symbols like `mg_start`. On platforms that link PHP extensions with `-flat_namespace` (notably macOS), loading two or more of these extensions into one process risks one's compiled civetweb code silently shadowing another's — with no error, no warning, just undefined behavior up to and including crashes. Run each in its own process (e.g. `core` for your HTTP app, `socket` for a separate WebSocket process, fronted by `gateway`) rather than combining `-d extension=` flags for more than one of them.
 
 ## Tests
 

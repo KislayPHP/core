@@ -113,9 +113,23 @@ class Container
         self::$singletons = [];
         self::$factories  = [];
         self::$instances  = [];
+        self::$resolving  = [];
     }
 
     // ── Auto-wiring ───────────────────────────────────────────────────────────
+
+    /**
+     * Classes currently being auto-wired on this call stack (as a set, class
+     * name => true), used to detect circular constructor dependencies.
+     * Without this, A depending on B depending on A recurses into get() for
+     * each before either has a chance to be cached in $instances - genuine
+     * infinite recursion (a fatal "possible infinite loop" / stack overflow
+     * with no indication which classes are involved), rather than a clear
+     * error naming the cycle.
+     *
+     * @var array<string, true>
+     */
+    private static array $resolving = [];
 
     /**
      * Auto-wire a class by resolving constructor parameters via Reflection.
@@ -131,39 +145,52 @@ class Container
             );
         }
 
-        $ref = new \ReflectionClass($class);
-
-        if (!$ref->isInstantiable()) {
+        if (isset(self::$resolving[$class])) {
+            $cycle = implode(' -> ', [...array_keys(self::$resolving), $class]);
             throw new \RuntimeException(
-                "Container: '{$class}' is not instantiable (abstract class or interface)."
+                "Container: circular dependency detected while auto-wiring '{$class}': {$cycle}"
             );
         }
+        self::$resolving[$class] = true;
 
-        $constructor = $ref->getConstructor();
+        try {
+            $ref = new \ReflectionClass($class);
 
-        if ($constructor === null) {
-            $instance = $ref->newInstance();
-            self::$instances[$class] = $instance;
-            return $instance;
-        }
-
-        $args = [];
-        foreach ($constructor->getParameters() as $param) {
-            $type = $param->getType();
-
-            if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
-                $args[] = self::get($type->getName());
-            } elseif ($param->isDefaultValueAvailable()) {
-                $args[] = $param->getDefaultValue();
-            } else {
+            if (!$ref->isInstantiable()) {
                 throw new \RuntimeException(
-                    "Container: cannot auto-wire parameter '{$param->getName()}' of '{$class}'"
-                    . " — no type hint and no default value."
+                    "Container: '{$class}' is not instantiable (abstract class or interface)."
                 );
             }
+
+            $constructor = $ref->getConstructor();
+
+            if ($constructor === null) {
+                $instance = $ref->newInstance();
+                self::$instances[$class] = $instance;
+                return $instance;
+            }
+
+            $args = [];
+            foreach ($constructor->getParameters() as $param) {
+                $type = $param->getType();
+
+                if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+                    $args[] = self::get($type->getName());
+                } elseif ($param->isDefaultValueAvailable()) {
+                    $args[] = $param->getDefaultValue();
+                } else {
+                    throw new \RuntimeException(
+                        "Container: cannot auto-wire parameter '{$param->getName()}' of '{$class}'"
+                        . " — no type hint and no default value."
+                    );
+                }
+            }
+
+            $instance = $ref->newInstanceArgs($args);
+        } finally {
+            unset(self::$resolving[$class]);
         }
 
-        $instance = $ref->newInstanceArgs($args);
         self::$instances[$class] = $instance;
         return $instance;
     }
