@@ -8,6 +8,7 @@ extern "C" {
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_gc.h"
 #include "Zend/zend_smart_str.h"
+#include "Zend/zend_closures.h"
 
 #if defined(ZTS)
 ZEND_TSRMLS_CACHE_EXTERN();
@@ -3355,12 +3356,12 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
             if (!ok || had_exception) {
                 request_error = handler_error.empty() ? "route callback failed" : handler_error;
                 if (had_exception) {
+                    zval exception_val;
+                    ZVAL_OBJ(&exception_val, EG(exception));
+                    GC_ADDREF(EG(exception));
+                    zend_clear_exception();
+
                     if (!app->error_handlers.empty()) {
-                        zval exception_val;
-                        ZVAL_OBJ(&exception_val, EG(exception));
-                        GC_ADDREF(EG(exception));
-                        zend_clear_exception();
-                        
                         for (auto &eh : app->error_handlers) {
                             zval eh_retval;
                             ZVAL_UNDEF(&eh_retval);
@@ -3375,14 +3376,32 @@ static void kislay_process_runtime_request(std::size_t runtime_lane,
                                 zend_clear_exception();
                             }
                         }
-                        
-                        zval_ptr_dtor(&exception_val);
-                        if (kislay_response_has_terminal_content(res)) {
-                            handled = true;
-                            goto kislay_runtime_route_done;
+                    }
+
+                    // onError() fires as a last-resort fallback: when no
+                    // use()-based (4-arity) error handler is registered at
+                    // all, or when none of them produced a terminal
+                    // response. Previously this handler was stored by
+                    // KislayApp::onError() but never invoked anywhere -
+                    // registering one had no effect.
+                    if (!kislay_response_has_terminal_content(res) && app->has_unhandled_error_handler) {
+                        zval eh_retval;
+                        ZVAL_UNDEF(&eh_retval);
+                        zval eh_args[3];
+                        ZVAL_COPY_VALUE(&eh_args[0], &exception_val);
+                        ZVAL_COPY_VALUE(&eh_args[1], &req_obj);
+                        ZVAL_COPY_VALUE(&eh_args[2], &res_obj);
+                        call_user_function(nullptr, nullptr, &app->unhandled_error_handler, &eh_retval, 3, eh_args);
+                        zval_ptr_dtor(&eh_retval);
+                        if (EG(exception)) {
+                            zend_clear_exception();
                         }
-                    } else {
-                        zend_clear_exception();
+                    }
+
+                    zval_ptr_dtor(&exception_val);
+                    if (kislay_response_has_terminal_content(res)) {
+                        handled = true;
+                        goto kislay_runtime_route_done;
                     }
                 } else if (!request_error.empty()) {
                     php_error_docref(nullptr, E_WARNING, "Kislay route execution failed: %s", request_error.c_str());
@@ -3414,6 +3433,23 @@ kislay_runtime_route_done:
             if (!app->cors_enabled && looks_like_browser_preflight) {
                 res->status_code = 403;
                 res->body = "CORS disabled. Enable with $app->setOption('cors', true).";
+            } else if (app->has_not_found_handler) {
+                // Previously stored by KislayApp::onNotFound() but never
+                // invoked anywhere - registering one had no effect.
+                zval nf_retval;
+                ZVAL_UNDEF(&nf_retval);
+                zval nf_args[2];
+                ZVAL_COPY_VALUE(&nf_args[0], &req_obj);
+                ZVAL_COPY_VALUE(&nf_args[1], &res_obj);
+                call_user_function(nullptr, nullptr, &app->not_found_handler, &nf_retval, 2, nf_args);
+                zval_ptr_dtor(&nf_retval);
+                if (EG(exception)) {
+                    zend_clear_exception();
+                }
+                if (!kislay_response_has_terminal_content(res)) {
+                    res->status_code = 404;
+                    res->body = "Not Found";
+                }
             } else {
                 res->status_code = 404;
                 res->body = "Not Found";
@@ -5480,12 +5516,21 @@ PHP_METHOD(KislayApp, use) {
             zend_throw_exception(zend_ce_exception, "Middleware must be callable", 0);
             RETURN_FALSE;
         }
-        // Detect arity to determine if this is an error handler (4 params)
+        // Detect arity to determine if this is an error handler (4 params).
+        // For IS_OBJECT this must resolve the SPECIFIC callable instance's
+        // own function definition, not the Closure class's generic __invoke
+        // table entry - looking up "__invoke" on Z_OBJCE_P(cb)->function_table
+        // finds the same shared placeholder for every Closure object
+        // regardless of its actual captured parameter list, so it reported
+        // num_args for none of them (every PHP closure the idiomatic way
+        // people register error-handling middleware) and this arity check
+        // never actually matched a real 4-parameter closure.
+        // zend_get_closure_method_def() resolves the real bound function for
+        // both Closure instances and general invokable objects.
         bool is_error_handler = false;
         zval *cb = path_or_callable;
         if (Z_TYPE_P(cb) == IS_OBJECT) {
-            zend_function *efn = static_cast<zend_function *>(zend_hash_str_find_ptr(
-                &Z_OBJCE_P(cb)->function_table, "__invoke", sizeof("__invoke") - 1));
+            const zend_function *efn = zend_get_closure_method_def(Z_OBJ_P(cb));
             if (efn) is_error_handler = (efn->common.num_args >= 4);
         } else if (Z_TYPE_P(cb) == IS_STRING) {
             zend_function *efn = (zend_function *)zend_hash_find_ptr(
