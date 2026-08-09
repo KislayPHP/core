@@ -4591,7 +4591,9 @@ PHP_METHOD(KislayResponse, sendJson) {
         Z_PARAM_LONG(status)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!kislay_is_valid_http_status(status)) {
+    // See the identical fix + comment in KislayResponse::json() above.
+    bool has_status = ZEND_NUM_ARGS() == 2;
+    if (has_status && !kislay_is_valid_http_status(status)) {
         zend_throw_exception(zend_ce_exception, "HTTP status code must be between 100 and 599", 0);
         RETURN_NULL();
     }
@@ -4617,7 +4619,9 @@ PHP_METHOD(KislayResponse, sendJson) {
         kislay_response_set_body(res, "", 0);
     }
 
-    res->status_code = status;
+    if (has_status) {
+        res->status_code = status;
+    }
     res->content_type = "application/json; charset=utf-8";
     RETURN_ZVAL(getThis(), 1, 0);
 }
@@ -4633,12 +4637,16 @@ PHP_METHOD(KislayResponse, sendXml) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(getThis()));
-    if (!kislay_is_valid_http_status(status)) {
+    // See the identical fix + comment in KislayResponse::json() below.
+    bool has_status = ZEND_NUM_ARGS() == 2;
+    if (has_status && !kislay_is_valid_http_status(status)) {
         zend_throw_exception(zend_ce_exception, "HTTP status code must be between 100 and 599", 0);
         RETURN_NULL();
     }
     kislay_response_set_body(res, xml, xml_len);
-    res->status_code = status;
+    if (has_status) {
+        res->status_code = status;
+    }
     res->content_type = "application/xml; charset=utf-8";
     RETURN_ZVAL(getThis(), 1, 0);
 }
@@ -4652,7 +4660,13 @@ PHP_METHOD(KislayResponse, json) {
         Z_PARAM_LONG(status)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!kislay_is_valid_http_status(status)) {
+    // Only touch status_code when the caller actually passed one. Previously
+    // this unconditionally applied the $status=200 default, so the common
+    // ->status(422)->json($data) chaining idiom silently discarded the 422
+    // and responded 200 - the same bug send() below this method already
+    // guards against with the identical ZEND_NUM_ARGS() check.
+    bool has_status = ZEND_NUM_ARGS() == 2;
+    if (has_status && !kislay_is_valid_http_status(status)) {
         zend_throw_exception(zend_ce_exception, "HTTP status code must be between 100 and 599", 0);
         RETURN_NULL();
     }
@@ -4678,7 +4692,9 @@ PHP_METHOD(KislayResponse, json) {
         kislay_response_set_body(res, "", 0);
     }
 
-    res->status_code = status;
+    if (has_status) {
+        res->status_code = status;
+    }
     res->content_type = "application/json; charset=utf-8";
     RETURN_ZVAL(getThis(), 1, 0);
 }
@@ -4694,12 +4710,18 @@ PHP_METHOD(KislayResponse, xml) {
     ZEND_PARSE_PARAMETERS_END();
 
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(getThis()));
-    if (!kislay_is_valid_http_status(status)) {
+    // Same status()->json()-chaining fix as KislayResponse::json(): only
+    // overwrite status_code when the caller actually passed one, so a prior
+    // ->status($code) call isn't silently reset to the $status=200 default.
+    bool has_status = ZEND_NUM_ARGS() == 2;
+    if (has_status && !kislay_is_valid_http_status(status)) {
         zend_throw_exception(zend_ce_exception, "HTTP status code must be between 100 and 599", 0);
         RETURN_NULL();
     }
     kislay_response_set_body(res, xml, xml_len);
-    res->status_code = status;
+    if (has_status) {
+        res->status_code = status;
+    }
     res->content_type = "application/xml; charset=utf-8";
     RETURN_ZVAL(getThis(), 1, 0);
 }
