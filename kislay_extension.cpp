@@ -332,6 +332,17 @@ typedef struct _php_kislay_response_t {
     zend_object std;
 } php_kislay_response_t;
 
+// Backs the real $next argument passed to 3-arg middleware closures
+// (function($req, $res, $next)) - see kislay_run_middleware_list(). One
+// instance is created per 3-arg middleware invocation; "called" records
+// whether the middleware actually invoked $next() during its own call
+// (synchronously, within kislay_call_php() - see that function's usage
+// site for why deferred/async $next() calls aren't supported).
+typedef struct _php_kislay_middleware_next_t {
+    bool called;
+    zend_object std;
+} php_kislay_middleware_next_t;
+
 struct KislayPendingHttpTask {
     php_kislay_async_http_t *async_http;
     std::string request_id;
@@ -858,6 +869,7 @@ static std::string kislay_sanitize_referrer_policy(const std::string &candidate,
 static zend_class_entry *kislay_app_ce;
 static zend_class_entry *kislay_request_ce;
 static zend_class_entry *kislay_response_ce;
+static zend_class_entry *kislay_middleware_next_ce;
 static zend_class_entry *kislay_async_http_ce;
 static zend_class_entry *kislay_promise_ce;
 static zend_class_entry *kislay_service_client_ce;
@@ -1455,6 +1467,7 @@ static zend_object_handlers kislay_response_handlers;
 static zend_object_handlers kislay_app_handlers;
 static zend_object_handlers kislay_async_http_handlers;
 static zend_object_handlers kislay_service_client_handlers;
+static zend_object_handlers kislay_middleware_next_handlers;
 
 static inline php_kislay_request_t *php_kislay_request_from_obj(zend_object *obj) {
     return reinterpret_cast<php_kislay_request_t *>(
@@ -1464,6 +1477,11 @@ static inline php_kislay_request_t *php_kislay_request_from_obj(zend_object *obj
 static inline php_kislay_response_t *php_kislay_response_from_obj(zend_object *obj) {
     return reinterpret_cast<php_kislay_response_t *>(
         reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_response_t, std));
+}
+
+static inline php_kislay_middleware_next_t *php_kislay_middleware_next_from_obj(zend_object *obj) {
+    return reinterpret_cast<php_kislay_middleware_next_t *>(
+        reinterpret_cast<char *>(obj) - XtOffsetOf(php_kislay_middleware_next_t, std));
 }
 
 static inline php_kislay_app_t *php_kislay_app_from_obj(zend_object *obj) {
@@ -1576,6 +1594,21 @@ static void kislay_response_free_obj(zend_object *object) {
     res->file_path.~basic_string();
     res->body.~basic_string();
     zend_object_std_dtor(&res->std);
+}
+
+static zend_object *kislay_middleware_next_create_object(zend_class_entry *ce) {
+    php_kislay_middleware_next_t *next = static_cast<php_kislay_middleware_next_t *>(
+        ecalloc(1, sizeof(php_kislay_middleware_next_t) + zend_object_properties_size(ce)));
+    zend_object_std_init(&next->std, ce);
+    object_properties_init(&next->std, ce);
+    next->called = false;
+    next->std.handlers = &kislay_middleware_next_handlers;
+    return &next->std;
+}
+
+static void kislay_middleware_next_free_obj(zend_object *object) {
+    php_kislay_middleware_next_t *next = php_kislay_middleware_next_from_obj(object);
+    zend_object_std_dtor(&next->std);
 }
 
 static zend_object *kislay_app_create_object(zend_class_entry *ce) {
@@ -2864,21 +2897,54 @@ static void kislay_call_object_method_no_args(zval *object, const char *method) 
     zval_ptr_dtor(&callable);
 }
 
+PHP_METHOD(KislayMiddlewareNext, __invoke) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    php_kislay_middleware_next_t *next = php_kislay_middleware_next_from_obj(Z_OBJ_P(getThis()));
+    next->called = true;
+    RETURN_NULL();
+}
+
 static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_obj, zval *res_obj, std::string *error_out = nullptr) {
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(res_obj));
     for (const auto &mw : list) {
-        zval args[2];
+        // Detect real 3-arg (Express-style $next) middleware the same way
+        // KislayApp::use() already detects 4-arg error handlers -
+        // zend_get_closure_method_def() resolves the SPECIFIC closure's own
+        // bound function, not the shared Closure::__invoke table entry
+        // (which never carries a real param count). Existing 2-arg
+        // middleware (the only contract this ever actually supported until
+        // now) is completely unaffected - this only changes behavior for
+        // closures that genuinely declare 3+ params.
+        bool wants_next = false;
+        zval *mw_cv = const_cast<zval *>(&mw);
+        if (Z_TYPE_P(mw_cv) == IS_OBJECT) {
+            const zend_function *mfn = zend_get_closure_method_def(Z_OBJ_P(mw_cv));
+            if (mfn) wants_next = (mfn->common.num_args >= 3);
+        }
+
+        zval next_obj;
+        ZVAL_UNDEF(&next_obj);
+        zval args[3];
         ZVAL_COPY_VALUE(&args[0], req_obj);
         ZVAL_COPY_VALUE(&args[1], res_obj);
+        uint32_t argc = 2;
+        if (wants_next) {
+            object_init_ex(&next_obj, kislay_middleware_next_ce);
+            ZVAL_COPY_VALUE(&args[2], &next_obj);
+            argc = 3;
+        }
 
         zval retval;
         std::string middleware_error;
-        bool ok = kislay_call_php(const_cast<zval *>(&mw), 2, args, &retval, &middleware_error);
+        bool ok = kislay_call_php(mw_cv, argc, args, &retval, &middleware_error);
 
         const bool had_exception = (EG(exception) != nullptr);
         if (!ok || had_exception) {
             if (!Z_ISUNDEF(retval)) {
                 zval_ptr_dtor(&retval);
+            }
+            if (wants_next) {
+                zval_ptr_dtor(&next_obj);
             }
             if (error_out != nullptr) {
                 *error_out = middleware_error.empty() ? "middleware callback failed" : middleware_error;
@@ -2890,11 +2956,26 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
             return false;
         }
 
-        bool continue_chain = true;
-        if (!Z_ISUNDEF(retval)) {
-            convert_to_boolean(&retval);
-            continue_chain = Z_TYPE(retval) != IS_FALSE;
-            zval_ptr_dtor(&retval);
+        bool continue_chain;
+        if (wants_next) {
+            // Express semantics: whether the chain continues is decided by
+            // whether $next() was actually called (synchronously, within
+            // this call - see kislay_call_php() above), not by the
+            // closure's return value, which 3-arg middleware isn't
+            // expected to use at all.
+            php_kislay_middleware_next_t *next_state = php_kislay_middleware_next_from_obj(Z_OBJ(next_obj));
+            continue_chain = next_state->called;
+            zval_ptr_dtor(&next_obj);
+            if (!Z_ISUNDEF(retval)) {
+                zval_ptr_dtor(&retval);
+            }
+        } else {
+            continue_chain = true;
+            if (!Z_ISUNDEF(retval)) {
+                convert_to_boolean(&retval);
+                continue_chain = Z_TYPE(retval) != IS_FALSE;
+                zval_ptr_dtor(&retval);
+            }
         }
         if (!continue_chain) {
             if (!kislay_response_has_content(res)) {
@@ -2910,22 +2991,33 @@ static bool kislay_run_middleware_list(const std::vector<zval> &list, zval *req_
     return true;
 }
 
+// request_had_error, when non-null, is passed as an extra 3rd bool arg to
+// every hook - used only for request-end hooks, so a hook (e.g. Persistence
+// Runtime::cleanup()) can distinguish a clean request from a failed one and
+// commit vs. roll back accordingly. Request-start hooks pass nullptr here
+// and keep getting exactly 2 args, unchanged.
 static bool kislay_run_hook_list(
     const std::vector<zval> &hooks,
     zval *req_obj,
     zval *res_obj,
     const char *phase,
-    std::string *error_out = nullptr
+    std::string *error_out = nullptr,
+    const bool *request_had_error = nullptr
 ) {
     php_kislay_response_t *res = php_kislay_response_from_obj(Z_OBJ_P(res_obj));
     for (const auto &hook : hooks) {
-        zval args[2];
+        zval args[3];
         ZVAL_COPY_VALUE(&args[0], req_obj);
         ZVAL_COPY_VALUE(&args[1], res_obj);
+        uint32_t argc = 2;
+        if (request_had_error != nullptr) {
+            ZVAL_BOOL(&args[2], *request_had_error);
+            argc = 3;
+        }
 
         zval retval;
         std::string hook_error;
-        bool ok = kislay_call_php(const_cast<zval *>(&hook), 2, args, &retval, &hook_error);
+        bool ok = kislay_call_php(const_cast<zval *>(&hook), argc, args, &retval, &hook_error);
         if (ok) {
             zval_ptr_dtor(&retval);
         }
@@ -3478,7 +3570,8 @@ kislay_runtime_request_done:
     }
 
     if (!app->request_end_hooks.empty()) {
-        kislay_run_hook_list(app->request_end_hooks, &req_obj, &res_obj, "request-end", nullptr);
+        const bool request_had_error = !request_error.empty();
+        kislay_run_hook_list(app->request_end_hooks, &req_obj, &res_obj, "request-end", nullptr, &request_had_error);
     }
 
     zval_ptr_dtor(&req_obj);
@@ -7593,6 +7686,11 @@ static const zend_function_entry kislay_response_methods[] = {
     PHP_FE_END
 };
 
+static const zend_function_entry kislay_middleware_next_methods[] = {
+    PHP_ME(KislayMiddlewareNext, __invoke, arginfo_kislay_void, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
 static const zend_function_entry kislay_app_methods[] = {
     PHP_ME(KislayApp, __construct, arginfo_kislay_void, ZEND_ACC_PUBLIC)
     PHP_ME(KislayApp, setOption, arginfo_kislay_app_set_option, ZEND_ACC_PUBLIC)
@@ -7892,6 +7990,13 @@ PHP_MINIT_FUNCTION(kislayphp_extension) {
     std::memcpy(&kislay_response_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
     kislay_response_handlers.offset = XtOffsetOf(php_kislay_response_t, std);
     kislay_response_handlers.free_obj = kislay_response_free_obj;
+
+    INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "MiddlewareNext", kislay_middleware_next_methods);
+    kislay_middleware_next_ce = zend_register_internal_class(&ce);
+    kislay_middleware_next_ce->create_object = kislay_middleware_next_create_object;
+    std::memcpy(&kislay_middleware_next_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
+    kislay_middleware_next_handlers.offset = XtOffsetOf(php_kislay_middleware_next_t, std);
+    kislay_middleware_next_handlers.free_obj = kislay_middleware_next_free_obj;
 
     INIT_NS_CLASS_ENTRY(ce, "Kislay\\Core", "App", kislay_app_methods);
     kislay_app_ce = zend_register_internal_class(&ce);

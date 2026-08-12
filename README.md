@@ -55,7 +55,7 @@ sudo make install
 
 - Routes support only static segments and `:param` segments.
 - Regex-style routes and wildcard route fragments are rejected at registration time.
-- Middleware uses `function ($req, $res)` and must return a truthy value to continue.
+- Middleware supports two signatures: `function ($req, $res)`, which must return a truthy value to continue (returning falsy/nothing halts the chain with a 403 unless the middleware already wrote its own response), or `function ($req, $res, $next)` (fixed 2026-08-12 — previously threw `ArgumentCountError` on every request), where calling `$next()` continues the chain and not calling it halts it. **`$next()` is synchronous-only, not a full "onion model" continuation**: it must be called from within the middleware's own function body (a later/deferred call, e.g. from inside a promise callback, won't work), and code written *after* the `$next()` call runs before the rest of the chain executes, not after it returns — unlike Express.js, where code after `next()` runs once the downstream chain has fully unwound. If you need to run cleanup code after the whole chain (including the route handler) completes, use `onRequestEnd()` instead.
 - Query/body parsing is lazy.
 - `listenAsync()` requires ZTS. On NTS, run `listen()` in its own process.
 - `AsyncHttp` self-requests are rejected in single PHP runtime mode to avoid deadlocks.
