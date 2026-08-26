@@ -18,7 +18,10 @@ struct UvConnection;
 
 class UvServer {
 public:
-    UvServer(std::string host, int port, std::unique_ptr<PhpRuntimePool>& pool);
+    // max_body_bytes: 0 means unlimited, matching the CivetWeb path's
+    // app->max_body_bytes convention (kislay_extension.cpp).
+    UvServer(std::string host, int port, std::unique_ptr<PhpRuntimePool>& pool,
+             size_t max_body_bytes = 0);
     ~UvServer();
 
     bool start();
@@ -31,6 +34,7 @@ private:
     std::string host_;
     int port_;
     std::unique_ptr<PhpRuntimePool>& pool_;
+    size_t max_body_bytes_;
     
     uv_loop_t* loop_;
     uv_tcp_t server_;

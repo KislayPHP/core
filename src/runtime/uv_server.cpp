@@ -33,6 +33,16 @@ struct UvConnection {
     
     // Reference counting / lifecycle
     bool active{true};
+
+    // Set from the request's "Connection" header in on_headers_complete,
+    // before current_request is moved out to the worker pool in
+    // on_message_complete (so process_responses(), which only has `conn`
+    // and no access to the original request, can still see it at write
+    // time). Previously nothing here ever closed a non-5xx connection - a
+    // client sending "Connection: close" (as any single-shot client, and
+    // every test in tests/server_helper.inc's make_request(), does) would
+    // hang waiting for EOF that would never come.
+    bool client_wants_close{false};
 };
 
 // --- llhttp callbacks ---
@@ -83,11 +93,35 @@ int UvServer::on_headers_complete(llhttp_t* parser) {
         conn->current_request.headers[field] = conn->current_header_value;
     }
     conn->current_request.method = llhttp_method_name((llhttp_method_t)parser->method);
+
+    // Recorded on the connection itself (not just current_request) because
+    // current_request is moved out to the worker pool in
+    // on_message_complete, and process_responses() - where the write
+    // actually happens - only has the UvConnection*, not the original
+    // request.
+    auto it = conn->current_request.headers.find("connection");
+    if (it != conn->current_request.headers.end()) {
+        std::string value = it->second;
+        for (auto &c : value) c = std::tolower(c);
+        if (value.find("close") != std::string::npos) {
+            conn->client_wants_close = true;
+        }
+    }
     return 0;
 }
 
 int UvServer::on_body(llhttp_t* parser, const char* at, size_t length) {
     UvConnection* conn = static_cast<UvConnection*>(parser->data);
+    // Mirrors the CivetWeb path's app->max_body_bytes guard
+    // (kislay_extension.cpp) - checked cumulatively here (rather than off a
+    // declared Content-Length up front) so it also catches chunked-encoded
+    // bodies with no declared length. Returning a non-zero errno stops
+    // llhttp_execute() from calling further callbacks and makes it return
+    // that errno to on_read(), which closes the connection.
+    if (conn->server->max_body_bytes_ > 0 &&
+        conn->current_request.body.size() + length > conn->server->max_body_bytes_) {
+        return HPE_USER;
+    }
     conn->current_request.body.append(at, length);
     return 0;
 }
@@ -106,7 +140,7 @@ struct UvCompletion : public RequestCompletion {
 
 int UvServer::on_message_complete(llhttp_t* parser) {
     UvConnection* conn = static_cast<UvConnection*>(parser->data);
-    
+
     // Parse query params out of URI
     size_t qpos = conn->current_request.uri.find('?');
     if (qpos != std::string::npos) {
@@ -146,7 +180,17 @@ void UvServer::on_close(uv_handle_t* handle) {
 void UvServer::on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     UvConnection* conn = static_cast<UvConnection*>(stream->data);
     if (nread > 0) {
-        llhttp_execute(&conn->parser, buf->base, nread);
+        llhttp_errno_t err = llhttp_execute(&conn->parser, buf->base, nread);
+        if (err != HPE_OK && conn->active) {
+            // Malformed request or an on_body/on_* callback signaled abort
+            // (e.g. the max_body_bytes cap above) - this return value used
+            // to be discarded entirely, leaving the connection open forever
+            // with no response and no further reads. Close it instead.
+            conn->active = false;
+            if (buf->base) free(buf->base);
+            uv_close((uv_handle_t*)stream, on_close);
+            return;
+        }
     } else if (nread < 0) {
         if (nread != UV_EOF) {
             std::cerr << "Read error: " << uv_err_name(nread) << std::endl;
@@ -254,7 +298,11 @@ void UvServer::process_responses() {
         wr->buf.base = (char*)malloc(raw.size());
         wr->buf.len = raw.size();
         memcpy(wr->buf.base, raw.data(), raw.size());
-        wr->close_after_write = (res.status_code >= 500);
+        // Previously only 5xx responses closed the connection afterward, so
+        // a client that sent "Connection: close" (as any single-shot
+        // client reasonably does) would sit waiting for EOF that would
+        // never arrive - the connection stayed open indefinitely.
+        wr->close_after_write = (res.status_code >= 500) || conn->client_wants_close;
         
         uv_write(&wr->req, (uv_stream_t*)&conn->handle, &wr->buf, 1, on_write_done);
     }
@@ -267,8 +315,9 @@ void UvServer::on_async_wakeup(uv_async_t* handle) {
 
 // --- UvServer Implementation ---
 
-UvServer::UvServer(std::string host, int port, std::unique_ptr<PhpRuntimePool>& pool)
-    : host_(std::move(host)), port_(port), pool_(pool) {
+UvServer::UvServer(std::string host, int port, std::unique_ptr<PhpRuntimePool>& pool,
+                    size_t max_body_bytes)
+    : host_(std::move(host)), port_(port), pool_(pool), max_body_bytes_(max_body_bytes) {
     loop_ = uv_loop_new();
 }
 

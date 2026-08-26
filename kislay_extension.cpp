@@ -1317,7 +1317,8 @@ static bool kislay_app_start_server_uv(php_kislay_app_t *app, const std::string 
         port = std::stoi(listen_addr);
     }
 
-    app->uv_server.reset(new kislay::runtime::UvServer(host, port, app->php_runtime_pool));
+    app->uv_server.reset(new kislay::runtime::UvServer(host, port, app->php_runtime_pool,
+                                                        app->max_body_bytes));
     return app->uv_server->start();
 }
 
