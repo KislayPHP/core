@@ -131,8 +131,8 @@ struct UvCompletion : public RequestCompletion {
     UvServer* server;
     
     UvCompletion(UvConnection* c, UvServer* s) : conn(c), server(s) {}
-    
-    void complete(RuntimeResponseMessage response) {
+
+    void complete(RuntimeResponseMessage response) override {
         // Queue the response and wake the libuv loop
         server->enqueue_response(conn, std::move(response));
     }
