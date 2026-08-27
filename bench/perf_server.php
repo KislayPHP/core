@@ -38,6 +38,10 @@ $port = (int)(getenv('BENCH_PORT') ?: 9191);
 
 $app = new Kislay\Core\App();
 $app->setOption('log', false);
+$serverType = getenv('BENCH_SERVER_TYPE');
+if ($serverType) {
+    $app->setOption('server_type', $serverType);
+}
 
 // ── Static files ──────────────────────────────────────────────────────────────
 $staticDir = __DIR__ . '/static';
