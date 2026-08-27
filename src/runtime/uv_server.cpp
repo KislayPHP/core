@@ -1,5 +1,6 @@
 #include "kislay/runtime/uv_server.h"
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -174,6 +175,33 @@ void UvServer::on_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *bu
 
 void UvServer::on_close(uv_handle_t* handle) {
     UvConnection* conn = static_cast<UvConnection*>(handle->data);
+
+    // A worker thread can be mid-handler for this connection - holding a
+    // UvCompletion built from this exact `conn` pointer - when the client
+    // resets it. uv_close()/on_close() run on this loop thread regardless
+    // of what the worker thread is doing, so `delete conn` below can (and
+    // under real concurrent load, reliably does) run well before that
+    // worker later calls complete() -> enqueue_response(conn, ...) with a
+    // pointer that's already dangling by then. Checking a flag on `conn`
+    // itself at write time isn't safe either - it's the same
+    // read-through-a-maybe-freed-pointer hazard, just moved. Confirmed via
+    // a real crash under concurrent resets: libuv's own
+    // uv__check_before_write assertion firing because conn->handle.type
+    // read as garbage from freed memory (SIGABRT, "does not yet support
+    // other types of streams").
+    //
+    // live_connections_ (checked in process_responses() before it ever
+    // touches `conn`) is the actual safety gate - erase from it here,
+    // before delete, while `conn` is still guaranteed valid. This is safe
+    // regardless of whether the worker's enqueue_response() call for this
+    // connection happens before or after this erase, since
+    // process_responses() never dereferences `conn` until it has already
+    // confirmed membership in this always-valid set.
+    {
+        std::lock_guard<std::mutex> lock(conn->server->response_mutex_);
+        conn->server->live_connections_.erase(conn);
+    }
+
     delete conn;
 }
 
@@ -214,21 +242,47 @@ void UvServer::on_new_connection(uv_stream_t *server_handle, int status) {
     UvServer* server = static_cast<UvServer*>(server_handle->data);
     UvConnection* conn = new UvConnection();
     conn->server = server;
-    
+    {
+        std::lock_guard<std::mutex> lock(server->response_mutex_);
+        server->live_connections_.insert(conn);
+    }
+
     uv_tcp_init(server->loop_, &conn->handle);
     conn->handle.data = conn;
     
     if (uv_accept(server_handle, (uv_stream_t*)&conn->handle) == 0) {
-        llhttp_settings_t settings;
-        llhttp_settings_init(&settings);
-        settings.on_message_begin = on_message_begin;
-        settings.on_url = on_url;
-        settings.on_header_field = on_header_field;
-        settings.on_header_value = on_header_value;
-        settings.on_headers_complete = on_headers_complete;
-        settings.on_body = on_body;
-        settings.on_message_complete = on_message_complete;
-        
+        // llhttp_init() only stores the *pointer* it's given
+        // (parser->settings = (void*) settings - see third_party/llhttp/src/api.c)
+        // rather than copying the struct. `settings` here used to be a
+        // stack-local of this function - valid on entry, but on_new_connection()
+        // returns immediately after uv_read_start(), so by the time on_read()
+        // later calls llhttp_execute() (a separate, later callback invocation
+        // with its own stack frame) on_read() dereferences conn->parser.settings
+        // into memory that used to be this function's stack frame, long since
+        // reused by other calls. Every connection accepted by this server was
+        // reading callback pointers out of a dangling stack slot - apparently
+        // "worked" on macOS/clang/arm64 (the stale stack memory happened to
+        // still look like valid function pointers long enough), but crashed
+        // reliably and immediately, on the very first request of any kind, on
+        // Linux/gcc/arm64 (confirmed via gdb: SIGSEGV in llhttp__on_url_complete
+        // jumping to a garbage address read from the stale stack slot). All
+        // connections share the exact same callback set, so hoist it to a
+        // single static instance built once (C++11 guarantees thread-safe
+        // static-local init) instead of rebuilding a short-lived one per
+        // connection.
+        static const llhttp_settings_t settings = [] {
+            llhttp_settings_t s;
+            llhttp_settings_init(&s);
+            s.on_message_begin = on_message_begin;
+            s.on_url = on_url;
+            s.on_header_field = on_header_field;
+            s.on_header_value = on_header_value;
+            s.on_headers_complete = on_headers_complete;
+            s.on_body = on_body;
+            s.on_message_complete = on_message_complete;
+            return s;
+        }();
+
         llhttp_init(&conn->parser, HTTP_REQUEST, &settings);
         conn->parser.data = conn;
         
@@ -265,11 +319,45 @@ void UvServer::process_responses() {
     for (auto& pair : queue) {
         UvConnection* conn = pair.first;
         RuntimeResponseMessage& res = pair.second;
-        
+
+        // conn may already be freed (client reset the connection while a
+        // worker thread was still computing this response - see the
+        // matching comment in on_close()) - live_connections_ is the only
+        // thing we're allowed to touch before proving conn is still valid;
+        // never dereference conn itself until this check passes.
+        {
+            std::lock_guard<std::mutex> lock(response_mutex_);
+            if (live_connections_.find(conn) == live_connections_.end()) {
+                continue;
+            }
+        }
+
+        // Response::sendFile() (kislay_extension.cpp) sets send_file/file_path
+        // and clears body, relying on the backend to stream the file. The
+        // CivetWeb backend does that via mg_send_file_body(); this backend
+        // previously had no equivalent at all, so a libuv response to
+        // sendFile() always serialized an empty body - read the file here.
+        // In-memory read (matching res.body being an in-memory std::string
+        // everywhere else in this backend already) rather than a true
+        // streamed/chunked write; fine for the file sizes this framework's
+        // own examples/benchmarks serve, but a very large file would be
+        // read fully into memory before the first byte is written.
+        std::string file_body;
+        const std::string* body = &res.body;
+        if (res.send_file && !res.file_path.empty()) {
+            std::ifstream file(res.file_path, std::ios::binary);
+            if (file) {
+                std::ostringstream ss;
+                ss << file.rdbuf();
+                file_body = ss.str();
+            }
+            body = &file_body;
+        }
+
         // Build response header into a flat std::string to avoid ostringstream overhead.
         // Body is appended directly — no separate malloc/memcpy for header+body merge.
         std::string raw;
-        raw.reserve(128 + res.body.size());
+        raw.reserve(128 + body->size());
         raw += "HTTP/1.1 ";
         raw += std::to_string(res.status_code);
         raw += ' ';
@@ -278,6 +366,11 @@ void UvServer::process_responses() {
 
         bool has_content_type = false;
         for (const auto& h : res.headers) {
+            // Content-Length is always written below from the actual body
+            // we're about to send (res->headers may carry a stale/advisory
+            // one, e.g. from sendFile() - see above) - skip it here so we
+            // never emit two Content-Length header lines for one response.
+            if (h.first == "content-length") continue;
             raw += h.first;
             raw += ": ";
             raw += h.second;
@@ -290,9 +383,9 @@ void UvServer::process_responses() {
             raw += "\r\n";
         }
         raw += "Content-Length: ";
-        raw += std::to_string(res.body.size());
+        raw += std::to_string(body->size());
         raw += "\r\n\r\n";
-        raw += res.body;
+        raw += *body;
 
         WriteReq* wr = new WriteReq();
         wr->buf.base = (char*)malloc(raw.size());

@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -45,6 +46,16 @@ private:
     // Lock-free-ish queue for cross-thread responses
     std::mutex response_mutex_;
     std::vector<std::pair<UvConnection*, RuntimeResponseMessage>> response_queue_;
+
+    // Connections currently open at the libuv/OS level, guarded by the same
+    // response_mutex_. A worker thread can still be computing a response
+    // for a connection the client has since reset - process_responses()
+    // must never dereference a UvConnection* it pops from response_queue_
+    // without first confirming membership here, since on_close() (running
+    // on the loop thread, independent of worker-thread timing) may have
+    // already deleted it. See on_close()/process_responses() in
+    // uv_server.cpp for the full race this closes.
+    std::unordered_set<UvConnection*> live_connections_;
 
     // libuv callbacks
     static void on_new_connection(uv_stream_t *server, int status);
