@@ -167,6 +167,15 @@ public:
             if (kislay_call_php(&it->second, 1, args, &retval)) {
                 zval_ptr_dtor(&retval);
             }
+            // See the matching comment in kislay_promise_invoke_callback():
+            // a registered then()/catch()/finally() handler that throws has
+            // no caller here to propagate to - clear it rather than leave
+            // it dangling for some unrelated later opcode to surface as a
+            // confusing fatal error.
+            if (EG(exception) != nullptr) {
+                php_error_docref(nullptr, E_WARNING, "Kislay promise callback threw an uncaught exception");
+                zend_clear_exception();
+            }
             zval_ptr_dtor(&args[0]);
             zval_ptr_dtor(&it->second);
         }
@@ -1319,7 +1328,25 @@ static bool kislay_app_start_server_uv(php_kislay_app_t *app, const std::string 
 
     app->uv_server.reset(new kislay::runtime::UvServer(host, port, app->php_runtime_pool,
                                                         app->max_body_bytes));
-    return app->uv_server->start();
+    if (!app->uv_server->start()) {
+        return false;
+    }
+
+    // kislay_app_start_server() (the CivetWeb path) sets these three right
+    // after mg_start() succeeds; this libuv path never mirrored that, so
+    // kislay_active_app stayed nullptr for the lifetime of any
+    // server_type=libuv app. Every piece of code that reads it via
+    // kislay_active_app.load() to find "the current app" - the global
+    // async() function, KislayAsyncHttp::execute()/executeAsync(), and
+    // SIGINT/SIGTERM's own handler - silently failed for libuv-only
+    // servers (async()/AsyncHttp threw "No active Kislay App found...",
+    // and signals never flipped app->running). kislay_app_stop_server()
+    // already unconditionally calls kislay_app_clear_active() for both
+    // backends, so this pairs with an existing, already-correct clear.
+    kislay_install_signal_handlers();
+    kislay_active_app.store(app, std::memory_order_relaxed);
+    kislay_signal_stop_requested.store(false, std::memory_order_relaxed);
+    return true;
 }
 
 static void kislay_app_stop_server_uv(php_kislay_app_t *app) {
@@ -2851,12 +2878,29 @@ static bool kislay_call_php(zval *callable, uint32_t argc, zval *argv, zval *ret
         }
         return false;
     }
-    if (EG(exception) != nullptr) {
-        if (error_out != nullptr) {
-            *error_out = "exception in callable " + kislay_callable_debug_name(callable) + " (" + kislay_exception_debug_string() + ")";
-        }
-        return false;
-    }
+    // Deliberately NOT treating "the callable threw" as a kislay_call_php
+    // failure: call_user_function()'s SUCCESS/FAILURE reports whether the
+    // invocation itself happened (callable resolved, arg count matched),
+    // not whether the invoked PHP code threw - that's an orthogonal
+    // concern EG(exception) already carries. Every caller of this function
+    // already checks `!ok || EG(exception) != nullptr` independently (see
+    // e.g. the middleware/hook/route-handler dispatch sites) and clears the
+    // exception itself once it has captured what it needs from it - so
+    // returning false here for a thrown exception was both redundant with
+    // those checks AND actively wrong for a caller that (correctly, per
+    // this function's implied contract) only clears/handles EG(exception)
+    // in the true-with-EG(exception)-set branch, such as
+    // kislay_async_run_php_task(): with the old early-return here, that
+    // caller's `if (kislay_call_php(...)) { check EG(exception) }` never
+    // ran, so an async()-wrapped closure that threw fell into the generic
+    // "Deferred PHP task failed" rejection message instead of the real
+    // exception, AND left EG(exception) dangling uncleared (this function
+    // never cleared it on this path either) - manifesting later as a
+    // spurious "Uncaught Exception" fatal error at some unrelated point in
+    // script execution once nothing was left to consume it. If a future
+    // caller doesn't want to deal with EG(exception) itself, it should
+    // check for it explicitly, not rely on this function's return value to
+    // do it implicitly.
     return true;
 }
 
@@ -6177,11 +6221,20 @@ PHP_METHOD(KislayApp, listenAsync) {
         }
     }
 
-    // AsyncBridge is started in start_runtime
-    if (app->server_type == "libuv") { // Actually this is for listenAsync, let's just make it return true if not blocking
-        RETURN_TRUE;
-    }
-    kislay_app_wait_loop(app, -1);
+    // AsyncBridge is started in start_runtime. Unlike listen() (which
+    // deliberately blocks in kislay_app_wait_loop() below this point),
+    // listenAsync() must return control to the caller immediately - that's
+    // its entire contract (see lifecycle_async_test.phpt: it calls
+    // listenAsync(), then isRunning()/wait()/stop() itself). This used to
+    // only RETURN_TRUE for the libuv backend and fall through to the same
+    // blocking kislay_app_wait_loop(app, -1) that listen() uses for every
+    // other server_type - a leftover from listenAsync() being copy-pasted
+    // from listen(), only ever patched for the libuv case. That's exactly
+    // why every listenAsync()-based test hung indefinitely under a real ZTS
+    // build (they all default to server_type=civetweb): the runtime and
+    // server were both already started and fully functional above, this
+    // call just never returned to let the calling script do anything else.
+    RETURN_TRUE;
 }
 
 PHP_METHOD(KislayApp, wait) {
@@ -6523,25 +6576,38 @@ PHP_METHOD(KislayAsyncHttp, execute) {
 }
 
 static void kislay_async_http_apply_headers(php_kislay_async_http_t *async_http) {
-    php_kislay_request_t *active_req = kislay_active_request;
-    if (active_req) {
-        auto it = active_req->headers.find("x-correlation-id");
-        if (it != active_req->headers.end()) {
-            bool found = false;
-            struct curl_slist *curr = async_http->headers;
-            while (curr) {
-                if (strncasecmp(curr->data, "X-Correlation-ID:", 17) == 0) {
-                    found = true;
-                    break;
-                }
-                curr = curr->next;
-            }
-            if (!found) {
-                std::string h = "X-Correlation-ID: " + it->second;
-                async_http->headers = curl_slist_append(async_http->headers, h.c_str());
-                async_http->header_lines.push_back(h);
+    bool found = false;
+    struct curl_slist *curr = async_http->headers;
+    while (curr) {
+        if (strncasecmp(curr->data, "X-Correlation-ID:", 17) == 0) {
+            found = true;
+            break;
+        }
+        curr = curr->next;
+    }
+    if (!found) {
+        // Propagate the active request's own correlation ID if there is one
+        // (so a chain of outbound calls made from inside a route handler
+        // shares one ID end-to-end); otherwise generate a fresh one rather
+        // than sending no correlation ID at all - async_retry_test.phpt's
+        // own comments document this as the intended behavior even outside
+        // a request context (e.g. a CLI script kicking off a background
+        // AsyncHttp call has no kislay_active_request, but callers should
+        // still be able to trace that outbound request by its ID).
+        php_kislay_request_t *active_req = kislay_active_request;
+        std::string correlation_id;
+        if (active_req) {
+            auto it = active_req->headers.find("x-correlation-id");
+            if (it != active_req->headers.end() && !it->second.empty()) {
+                correlation_id = it->second;
             }
         }
+        if (correlation_id.empty()) {
+            correlation_id = kislay_generate_request_id();
+        }
+        std::string h = "X-Correlation-ID: " + correlation_id;
+        async_http->headers = curl_slist_append(async_http->headers, h.c_str());
+        async_http->header_lines.push_back(h);
     }
     curl_easy_setopt(async_http->curl, CURLOPT_HTTPHEADER, async_http->headers);
 }
@@ -6693,8 +6759,19 @@ PHP_METHOD(KislayAsyncHttp, retry) {
     async_http->retry_delay_ms = static_cast<int>(delay_ms);
     async_http->retry_count = 0;
 
-    RETURN_OBJ(Z_OBJ_P(getThis()));
+    // RETURN_OBJ(r) expands to `{ RETVAL_OBJ(r); return; }` (zend_API.h) -
+    // it returns unconditionally, so a GC_ADDREF placed after it (as this
+    // used to be) is dead code. The returned $this then carries a reference
+    // return_value's own eventual zval_ptr_dtor() will decrement but that
+    // was never actually incremented for - a real refcount underflow. For
+    // an unchained call like `$http->retry(2, 100);` (the discarded return
+    // value gets dtor'd right away) this could free $http's own object out
+    // from under the variable still holding it, corrupting every field
+    // (including the URL string) on next use - manifesting as a nonsensical
+    // "URL using bad/illegal format" curl error from executeAsync(). Must
+    // addref BEFORE returning, matching the standard "return $this" idiom.
     GC_ADDREF(Z_OBJ_P(getThis()));
+    RETURN_OBJ(Z_OBJ_P(getThis()));
 }
 
 PHP_METHOD(KislayAsyncHttp, getResponse) {
@@ -6890,6 +6967,17 @@ static void kislay_promise_invoke_callback(zval *callback, php_kislay_promise_t 
     ZVAL_COPY(&args[0], &promise->result);
     if (kislay_call_php(callback, 1, args, &retval)) {
         zval_ptr_dtor(&retval);
+    }
+    // A then()/catch()/finally() handler that itself throws has nowhere
+    // meaningful to propagate to from here (this can run from an arbitrary
+    // later drain point, not necessarily near any user code that could
+    // catch it) - clear it rather than let it dangle in EG(exception) and
+    // surface later as a confusing, unrelated "Uncaught Exception" at
+    // whatever next opcode happens to check for one. Log it so it isn't
+    // silently swallowed.
+    if (EG(exception) != nullptr) {
+        php_error_docref(nullptr, E_WARNING, "Kislay promise callback threw: %s", kislay_exception_debug_string().c_str());
+        zend_clear_exception();
     }
     zval_ptr_dtor(&args[0]);
 }

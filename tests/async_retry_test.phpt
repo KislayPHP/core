@@ -23,8 +23,14 @@ $app->get('/retry-test', function($req, $res) use (&$requestCount, &$receivedCor
     $receivedCorrelationId = $req->header('x-correlation-id');
     
     if ($requestCount === 1) {
-        // Fail the first time to trigger retry
-        $res->status(404)->send("Failed first");
+        // Fail the first time to trigger retry. Must be >=500: the retry
+        // worker (worker_pool.cpp's execute_and_maybe_retry) only treats a
+        // transport failure or 5xx as retryable by design - retrying an
+        // identical 4xx would just get the same client error again. A 404
+        // here was a bug in this test's own premise, not the runtime: it
+        // never actually exercised the retry path at all (silently, since
+        // nothing before this checked $requestCount reached 2).
+        $res->status(503)->send("Failed first");
     } else {
         $res->status(200)->send("Success on try {$requestCount}");
     }
@@ -48,19 +54,22 @@ $http->executeAsync()->then(function($res) use ($http, &$requestCount, &$receive
 ";
     echo "Has Correlation ID: " . ($receivedCorrelationId ? 'yes' : 'no') . "
 ";
-    
-    $app = Kislay\Core\App::isRunning() ? null : null; // just to keep script alive if needed, but wait() is better
 })->catch(function($err) {
     echo "Error: " . $err . "
 ";
 });
 
-// Wait for the async tasks to complete
+// Wait for the async tasks to complete. Must pump via $app->wait() (which
+// drains the async bridge - see kislay_app_wait_loop()/kislay_async_drain()
+// in kislay_extension.cpp), not a plain usleep() loop: nothing else resolves
+// the executeAsync() promise or fires its then()/catch() callbacks, so a
+// bare sleep loop here waits out the full timeout with zero output, whether
+// or not the underlying HTTP retries actually completed server-side.
 // Since we have a 100ms delay and 2 tries, 500ms should be enough.
 $start = microtime(true);
 while (microtime(true) - $start < 1.0) {
     if ($requestCount >= 2) break;
-    usleep(10000);
+    $app->wait(10);
 }
 
 $app->stop();
