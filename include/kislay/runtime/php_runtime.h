@@ -34,8 +34,9 @@ struct PhpRuntimeConfig {
 class RequestCompletion {
 public:
     RequestCompletion() = default;
+    virtual ~RequestCompletion() = default;
 
-    void complete(RuntimeResponseMessage response);
+    virtual void complete(RuntimeResponseMessage response);
     bool wait_for(RuntimeResponseMessage &response, std::chrono::milliseconds timeout);
 
     // Reset for reuse on thread-local instances — call before each new submit.
