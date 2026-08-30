@@ -396,8 +396,27 @@ void UvServer::process_responses() {
         // client reasonably does) would sit waiting for EOF that would
         // never arrive - the connection stayed open indefinitely.
         wr->close_after_write = (res.status_code >= 500) || conn->client_wants_close;
-        
-        uv_write(&wr->req, (uv_stream_t*)&conn->handle, &wr->buf, 1, on_write_done);
+
+        // uv_write()'s return value used to be discarded. A negative return
+        // means it failed SYNCHRONOUSLY, in which case libuv guarantees
+        // on_write_done is never invoked - so wr/wr->buf.base would leak on
+        // every such failure. This is reachable, not just theoretical: the
+        // live_connections_ check above only proves `conn` hasn't been
+        // *deleted* yet (on_close() hasn't run), not that its handle isn't
+        // already *closing* - uv_close() marks a handle closing immediately
+        // when called (e.g. from on_read() on a parse error on a later
+        // pipelined request on this same connection), but the matching
+        // on_close() completion - which is what erases live_connections_ -
+        // only runs on a later loop tick. A response for an earlier,
+        // still-in-flight request on that same connection can land here via
+        // process_responses() in that window, findslive_connections_ still
+        // still has it, and then hits uv_write() on an already-closing handle,
+        // which fails synchronously.
+        int wr_status = uv_write(&wr->req, (uv_stream_t*)&conn->handle, &wr->buf, 1, on_write_done);
+        if (wr_status < 0) {
+            free(wr->buf.base);
+            delete wr;
+        }
     }
 }
 
