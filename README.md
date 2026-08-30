@@ -2,7 +2,7 @@
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.2+-blue.svg)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-1.0.0-orange.svg)]()
+[![Release](https://img.shields.io/badge/Release-1.0.1-orange.svg)]()
 
 Kislay Core is the HTTP runtime for the KislayPHP ecosystem. It provides the embedded HTTP/HTTPS server, strict segment router, request/response lifecycle, middleware, async bridge, and Promise primitives used by the higher-level modules.
 
@@ -21,7 +21,7 @@ sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev
 ```
 
 ```bash
-pie install kislayphp/core:1.0.0
+pie install kislayphp/core:1.0.1
 ```
 
 Automation note:
@@ -59,6 +59,7 @@ sudo make install
 - Query/body parsing is lazy.
 - `listenAsync()` requires ZTS. On NTS, run `listen()` in its own process.
 - `AsyncHttp` self-requests are rejected in single PHP runtime mode to avoid deadlocks.
+- **Known issue (Darwin/ZTS only):** combining `listenAsync()` with `AsyncHttp`/`Promise` crashes with a SIGBUS, 100% reproducible on the very first `AsyncHttp::executeAsync()` cycle in a process. Confirmed *not* to reproduce on Linux/ZTS (20/20 clean) — this is specific to macOS's TLS/TSRM mechanics, not a portable Zend-core bug, and it is not yet root-caused despite multiple investigation passes. `listenAsync()` alone (without `AsyncHttp`) is safe. Workaround if you need this combination on macOS today: make one throwaway `executeAsync()` call immediately after `listenAsync()` returns, before any real one — this reliably avoids the crash in every variant tested, though the underlying mechanism isn't fully understood. Do not run this combination in production on macOS until resolved; Linux is unaffected.
 
 ## Quick start
 
@@ -124,7 +125,7 @@ $http->executeAsync()->then(function () use ($http) {
 
 ## Performance notes
 
-Validated locally on the NTS reference machine with tracing, request-id generation, and request logging disabled (figures below are from the `0.0.10` validation run; the hot-path work landing in `1.0.0` has not been re-measured against this exact `ab` command yet):
+Validated locally on the NTS reference machine with tracing, request-id generation, and request logging disabled (figures below are from the `0.0.10` validation run; the hot-path work landing in `1.0.0` has not been re-measured against this exact `ab` command yet; the 1.0.0→1.0.1 bump changed only the version string and README, not runtime code):
 
 - `/plaintext`: `23789.89 req/s` (`ab -n 100000 -c 100`)
 - `/users/:id`: `18915.87 req/s` (`ab -n 40000 -c 100`)
@@ -162,9 +163,9 @@ KislayPHP Core trails on peak throughput here — it's bound to a single dedicat
 php run-tests.php
 ```
 
-Current local result (`1.0.0`):
+Current local result (`1.0.1`, 2026-08-31):
 
-- `15 passed`
+- `20 passed`
 - `2 skipped` (`ZTS`-only async coverage)
 - `0 failed`
 
