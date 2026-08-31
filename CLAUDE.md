@@ -47,6 +47,47 @@ optional) immediately after `listenAsync()` returns, before any real one —
 this reliably avoids the crash in every variant tested, though the
 mechanism isn't understood well enough to call it a proven fix.
 
+## Sanitizer builds (ASan/UBSan/TSan)
+
+Top-level `Dockerfile.sanitize` (in the `kislayphp/` workspace, not this
+repo) builds this extension against a plain NTS PHP with
+`-fsanitize=address,undefined` or `-fsanitize=thread` baked into
+CXXFLAGS/LDFLAGS, then runs the phpt suite with the matching sanitizer
+runtime `LD_PRELOAD`ed into the PHP CLI host process (the extension is a
+`.so`, so global malloc/free interposition only works if the *host*
+process has the runtime loaded, not just the `.so`). Usage:
+
+```sh
+docker build -f ../Dockerfile.sanitize --build-arg MODULE=core --build-arg SANITIZER=asan -t kislayphp-sanitize-core-asan ..
+docker run --rm --cap-add=SYS_PTRACE kislayphp-sanitize-core-asan
+```
+
+**Known environment caveat, not a KislayPHP bug:** on the Ubuntu 22.04
+base image, OpenSSL's PKCS#11 engine loading pulls in `libp11-kit`, whose
+atexit handler can deadlock in `freelocale()`/`pthread_rwlock_wrlock()`
+during process exit — reproduces for a trivial `-r 'exit;'` script with
+just the extension loaded, confirmed via `gdb -p <pid> -batch -ex 'thread
+apply all bt'` landing entirely in libc/libp11-kit frames, no KislayPHP
+frames anywhere. It's non-deterministic (some invocations exit cleanly).
+The test runner (`sanitize-run-tests.sh`) wraps every PHP invocation in
+`timeout -s KILL`, so this can't hang the suite, but it does mean a
+"PASS" can get masked as an `EXIT-HANG` if the deadlock happens to fire on
+an otherwise-successful run — treat `EXIT-HANG` results as inconclusive,
+not failures. Worth revisiting (e.g. `OPENSSL_CONF=/dev/null` or a
+non-glibc base image) if sanitizer runs need to be authoritative rather
+than best-effort.
+
+**Real bug found and fixed this way (2026-08-31):** `app->entry_script_path`
+(a `std::string` member of `php_kislay_app_t`) was the only string member
+missing from both `kislay_app_create_object`'s placement-new list and
+`kislay_app_free_obj`'s placement-destructor list — it "worked" by
+accident (zeroed raw memory happens to behave like an empty string on this
+libstdc++ ABI) but leaked its heap buffer on every `listen()`/
+`listenAsync()` call that ever assigned a real path into it. Fixed by
+adding the missing placement-new/destructor pair. Confirmed via
+LeakSanitizer: present in 4/4 affected phpt tests before the fix, 0/3
+manual repro runs after.
+
 ## How bugs get found here (pattern, not just history)
 
 Several real bugs in this module were found only through hands-on
