@@ -65,6 +65,7 @@ php server.php
 
 - [Installation](getting-started/installation.md) — get all extensions installed
 - [Quick Start](getting-started/quick-start.md) — routes, middleware, JSON responses
+- [Architecture](getting-started/architecture.md) — why a real deployment is more than one process, and why `core`/`gateway`/`socket` must never share one
 - [Spring Boot Mapping](getting-started/spring-boot-mapping.md) — familiar Spring concepts mapped to PHP
 - [Performance & Benchmarks](advanced/performance.md) — v0.0.7 benchmark results vs Fastify, Go, Spring Boot
 

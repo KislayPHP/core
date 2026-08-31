@@ -47,6 +47,7 @@ nav:
   - Getting Started:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quick-start.md
+    - Architecture: getting-started/architecture.md
     - Spring Boot Mapping: getting-started/spring-boot-mapping.md
   - Extensions:
     - Core HTTP Server: extensions/core.md
