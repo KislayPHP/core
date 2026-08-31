@@ -68,14 +68,53 @@ atexit handler can deadlock in `freelocale()`/`pthread_rwlock_wrlock()`
 during process exit — reproduces for a trivial `-r 'exit;'` script with
 just the extension loaded, confirmed via `gdb -p <pid> -batch -ex 'thread
 apply all bt'` landing entirely in libc/libp11-kit frames, no KislayPHP
-frames anywhere. It's non-deterministic (some invocations exit cleanly).
-The test runner (`sanitize-run-tests.sh`) wraps every PHP invocation in
-`timeout -s KILL`, so this can't hang the suite, but it does mean a
-"PASS" can get masked as an `EXIT-HANG` if the deadlock happens to fire on
-an otherwise-successful run — treat `EXIT-HANG` results as inconclusive,
-not failures. Worth revisiting (e.g. `OPENSSL_CONF=/dev/null` or a
-non-glibc base image) if sanitizer runs need to be authoritative rather
-than best-effort.
+frames anywhere. Under ASan/UBSan it's non-deterministic (some invocations
+exit cleanly). The test runner (`sanitize-run-tests.sh`) wraps every PHP
+invocation in `timeout -s KILL`, so this can't hang the suite, but it does
+mean a "PASS" can get masked as an `EXIT-HANG` if the deadlock happens to
+fire on an otherwise-successful run — treat `EXIT-HANG` results as
+inconclusive, not failures.
+
+**Under TSan specifically (tried 2026-08-31), this caveat gets much worse:**
+nearly every test (including a bare `SKIPIF` probe script, before the real
+test body even runs) hit `EXIT-HANG`, re-confirmed via a fresh live `gdb`
+capture as the exact same `freelocale → libp11-kit → pthread_rwlock_wrlock`
+stack, at the same `exit()` call site — not a new/different bug, just hit
+far more often, most likely because TSan's own instrumentation overhead
+widens whatever race window makes this non-deterministic under ASan.
+`OPENSSL_CONF=/dev/null` (suggested below as a possible mitigation) was
+tried and did **not** avoid it. Net effect: TSan builds now succeed for
+this module (see build-fix note below) and the runtime works once invoked
+with `--security-opt seccomp=unconfined` (TSan's ASLR-disabling
+`personality()` call is blocked by Docker's default seccomp profile
+otherwise), but essentially no pass/fail signal could be extracted from a
+TSan run in this container environment — it needs a non-glibc base image
+(e.g. Alpine/musl) or an OpenSSL build without PKCS#11/engine support
+before TSan coverage here is actually usable, not just buildable.
+
+**TSan build fix (2026-08-31, `Dockerfile.sanitize`):** two separate
+problems, both specific to `-fsanitize=thread` on aarch64 under Docker,
+had to be fixed before the image would even build:
+1. TSan's runtime calls `personality(ADDR_NO_RANDOMIZE)` on every process
+   start to fix its shadow-memory layout; Docker's default seccomp profile
+   blocks that syscall outright, which used to crash even `./configure`'s
+   own generic "checking whether we are cross compiling" conftest
+   (`configure: error: cannot run C compiled programs`, exit 77) — nothing
+   to do with this module's own code.
+2. Fix: pass `--host=$(uname -m)-pc-linux-gnu` to `./configure` when
+   building with TSan. That triplet is textually different from what
+   `config.guess` detects, so autoconf treats the build as cross-compiling
+   and skips executing `AC_TRY_RUN` conftests (assumes safe defaults
+   instead), avoiding the crash — while `CFLAGS`/`CXXFLAGS`/`LDFLAGS` are
+   still exported *before* `./configure` runs (required separately, since
+   this module's own `config.m4` does `CFLAGS="$CFLAGS -DOPENSSL_API_3_0
+   ..."`, i.e. appends to whatever was already exported — dropping that
+   define is what broke civetweb's OpenSSL glue with unrelated-looking
+   `'SSL_connect' undeclared` errors during an earlier attempt at this fix).
+   At actual `docker run` time, the same `personality()` block still
+   applies to the extension's own TSan-instrumented code, so the run
+   command needs `--security-opt seccomp=unconfined` too (a normal runtime
+   flag — no BuildKit entitlement needed, unlike a build-time workaround).
 
 **Real bug found and fixed this way (2026-08-31):** `app->entry_script_path`
 (a `std::string` member of `php_kislay_app_t`) was the only string member
