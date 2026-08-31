@@ -14,69 +14,75 @@ Before installing KislayPHP extensions make sure your system has:
 
 ---
 
-## Via Composer
+## Via PIE (recommended)
 
-Each extension ships as a PHP package that bundles its compiled `.so` file for Linux x86-64 and macOS arm64/x86-64.
+Every extension ships as a real PHP source package (`"type": "php-ext"` in
+its `composer.json`) built and installed with
+[PIE](https://github.com/php/pie), PHP's own extension installer. **There
+are no pre-built binaries today** — PIE compiles the extension from source
+on your machine, so you still need a C++ compiler and the dependencies
+below installed first.
 
 ```bash
-# Core HTTP server (always required)
-composer require kislayphp/core
+# macOS (Homebrew)
+brew install libuv
 
-# Optional extensions — install only what you need
-composer require kislayphp/gateway
-composer require kislayphp/discovery
-composer require kislayphp/eventbus
-composer require kislayphp/queue
-composer require kislayphp/metrics
-composer require kislayphp/persistence
-composer require kislayphp/config
+# Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y pkg-config libcurl4-openssl-dev libssl-dev libuv1-dev
 ```
 
-The Composer post-install script copies the correct `.so` into your PHP extension directory automatically.
+```bash
+pie install kislayphp/core:1.0.1
+
+# Optional extensions — install only what you need
+pie install kislayphp/gateway
+pie install kislayphp/discovery
+pie install kislayphp/eventbus
+pie install kislayphp/queue
+pie install kislayphp/metrics
+pie install kislayphp/persistence
+pie install kislayphp/config
+```
+
+Then add the line PIE prints for you to `php.ini`, e.g.:
+
+```ini
+extension=kislayphp_extension.so
+```
+
+**Automation note:** in a non-interactive session on macOS, PIE may stop
+after the build step because its final install step needs `sudo`. The
+built module can still be validated directly from PIE's working directory
+before that last interactive step.
 
 ---
 
 ## Building from Source
 
-If your platform is not covered by pre-built binaries, build directly from the GitHub repository.
+If you'd rather not use PIE, clone and build any extension directly:
 
 ```bash
-# Clone the extension you want, e.g. core
-git clone https://github.com/KislayPHP/php-kislay-core
-cd php-kislay-core
-
-# Bootstrap the PHP extension build system
+git clone https://github.com/KislayPHP/core.git
+cd core
 phpize
-
-# Configure — enable optional features as needed
-./configure --enable-kislay-core
-
-# Compile
+./configure --enable-kislayphp_extension
 make -j$(nproc)
-
-# Install into the active PHP installation
 sudo make install
 ```
 
-Then add to your `php.ini`:
-
-```ini
-extension=kislay_core.so
-```
-
-Repeat for each extension repository.
+Repeat for each extension repository (`gateway`, `socket`, `discovery`,
+`queue`, `metrics`, `persistence`, `config`, `eventbus`), swapping the
+`--enable-*` flag for that module's own configure option.
 
 ---
 
 ## Docker
 
-A ready-to-use `docker-compose.production.yml` lives in the monorepo root. It bundles PHP 8.2 with all extensions pre-installed.
-
-```bash
-docker compose -f docker-compose.production.yml up
-```
-
-The image is built from `Dockerfile.prod` which runs the full `phpize` / `make` / `make install` cycle at build time, so you always get the latest compiled code.
+There is no published production Docker image yet. `Dockerfile.zts-sigbus`
+in the top-level workspace is a debugging/dev environment (Linux/ZTS
+build for chasing a specific platform-only bug), not something intended
+for running a real app — don't use it as a production base image.
 
 ---
 
@@ -86,17 +92,18 @@ The image is built from `Dockerfile.prod` which runs the full `phpize` / `make` 
 php -m | grep -i kislay
 ```
 
-Expected output (for a full install):
+Expected output (for a full install — module names, not package names):
 
 ```
-kislay_config
-kislay_core
-kislay_discovery
-kislay_eventbus
-kislay_gateway
-kislay_metrics
-kislay_persistence
-kislay_queue
+kislayphp_config
+kislayphp_discovery
+kislayphp_eventbus
+kislayphp_extension    # core
+kislayphp_gateway
+kislayphp_metrics
+kislayphp_persistence
+kislayphp_queue
+kislayphp_socket
 ```
 
 If an extension is missing, check `php --ini` to locate the active `php.ini` and ensure the `extension=` line was added.

@@ -2,7 +2,7 @@
 
 **High-performance PHP microservices framework powered by C++ extensions.**
 
-KislayPHP brings Spring Boot-inspired architecture to PHP — a suite of eight C++ extensions that deliver non-blocking HTTP, WebSocket, service discovery, message queues, metrics, and more, all accessible from idiomatic PHP code.
+KislayPHP brings Spring Boot-inspired architecture to PHP — a suite of nine C++ extensions (core, gateway, socket, eventbus, persistence, discovery, queue, metrics, config) that deliver non-blocking HTTP, WebSocket, service discovery, message queues, metrics, and more, all accessible from idiomatic PHP code.
 
 ---
 
@@ -23,16 +23,18 @@ KislayPHP brings Spring Boot-inspired architecture to PHP — a suite of eight C
 
 ## Extensions at a Glance
 
-| Extension | Composer Package | Purpose |
+| Extension | Install (via [PIE](https://github.com/php/pie), compiled from source) | Purpose |
 |---|---|---|
-| Core | `composer require kislayphp/core` | HTTP server, routing, middleware, HTTPS |
-| Gateway | `composer require kislayphp/gateway` | Reverse proxy, load balancing, circuit breaker |
-| Discovery | `composer require kislayphp/discovery` | Service register, resolve, weighted LB |
-| EventBus | `composer require kislayphp/eventbus` | WebSocket / Socket.IO, namespaces, auth |
-| Queue | `composer require kislayphp/queue` | Enqueue, TTL, DLQ, priority, delayed |
-| Metrics | `composer require kislayphp/metrics` | Counter / gauge / histogram, Prometheus export |
-| Persistence | `composer require kislayphp/persistence` | DB connect, CRUD, migrations |
-| Config | `composer require kislayphp/config` | Typed getters, live refresh, consul/etcd |
+| Core | `pie install kislayphp/core` | HTTP server, routing, middleware, HTTPS |
+| Gateway | `pie install kislayphp/gateway` | Reverse proxy, load balancing, circuit breaker |
+| Discovery | `pie install kislayphp/discovery` | Service register, resolve, weighted LB |
+| EventBus | `pie install kislayphp/eventbus` | WebSocket / Socket.IO, namespaces, auth |
+| Queue | `pie install kislayphp/queue` | Enqueue, TTL, DLQ, priority, delayed |
+| Metrics | `pie install kislayphp/metrics` | Counter / gauge / histogram, Prometheus export |
+| Persistence | `pie install kislayphp/persistence` | DB connect, CRUD, migrations |
+| Config | `pie install kislayphp/config` | Typed getters, live refresh, consul/etcd |
+
+See [Installation](getting-started/installation.md) — there are no pre-built binaries yet, so this compiles the extension on your machine (C++ compiler + headers required).
 
 ---
 
