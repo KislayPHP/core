@@ -1656,6 +1656,7 @@ static zend_object *kislay_app_create_object(zend_class_entry *ce) {
     app->ctx = nullptr;
     new (&app->uv_server) std::unique_ptr<kislay::runtime::UvServer>();
     new (&app->server_type) std::string("civetweb");
+    new (&app->entry_script_path) std::string();
     app->running.store(false, std::memory_order_relaxed);
     app->memory_limit_bytes = 0;
     app->gc_after_request = kislay_env_bool("KISLAYPHP_HTTP_ENABLE_GC", KISLAYPHP_EXTENSION_G(gc_enabled) != 0);
@@ -1821,6 +1822,7 @@ static void kislay_app_free_obj(zend_object *object) {
     app->default_tls_key.~basic_string();
     app->referrer_policy.~basic_string();
     app->server_type.~basic_string();
+    app->entry_script_path.~basic_string();
     app->uv_server.~unique_ptr();
     app->lock.~unique_ptr();
     // New features cleanup
