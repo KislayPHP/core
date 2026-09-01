@@ -10,7 +10,7 @@
 composer require kislayphp/persistence
 ```
 
-GitHub: <https://github.com/KislayPHP/php-kislay-persistence>
+GitHub: <https://github.com/KislayPHP/persistence>
 
 ---
 

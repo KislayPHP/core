@@ -10,8 +10,8 @@ Each extension is an independent C++ PHP extension. The build flow is the same f
 
 ```bash
 # Clone the extension you want to work on
-git clone https://github.com/KislayPHP/php-kislay-core
-cd php-kislay-core
+git clone https://github.com/KislayPHP/core
+cd core
 
 # Bootstrap
 phpize

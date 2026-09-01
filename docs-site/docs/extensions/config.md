@@ -10,7 +10,7 @@
 composer require kislayphp/config
 ```
 
-GitHub: <https://github.com/KislayPHP/php-kislay-config>
+GitHub: <https://github.com/KislayPHP/config>
 
 ---
 

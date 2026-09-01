@@ -2,77 +2,124 @@
 
 ## Overview
 
-`kislayphp/queue` provides an in-process, persistent message queue with first-class support for TTL, dead-letter queues (DLQ), priority levels, and delayed delivery. It is designed to handle background job processing, async task dispatch, and event-driven workflows within a KislayPHP monolith or microservice — no separate broker required for single-node deployments.
+`kislayphp/queue` is a native distributed job queue: a standalone queue server process, producer/worker clients, retries with backoff, delayed jobs, and dead-letter queue (DLQ) support. Delivery is at-least-once, with one leased job per worker fetch. Server state is in-memory only (no durable persistence backend — the RocksDB/Redis persistence options described in older docs don't exist).
+
+A separate, legacy `Kislay\Queue\Queue` class also exists as an in-process, single-node queue for local development — it's not the recommended path for real use.
 
 ## Installation
 
 ```bash
-composer require kislayphp/queue
+pie install kislayphp/queue:1.0.0
 ```
 
-GitHub: <https://github.com/KislayPHP/php-kislay-queue>
+```ini
+extension=kislayphp_queue.so
+```
+
+GitHub: <https://github.com/KislayPHP/queue>
 
 ---
 
 ## Key Features
 
-- **Enqueue / Dequeue** — push and pop JSON-serialisable payloads
-- **Priority queues** — integer priority; higher values processed first
-- **Delayed delivery** — schedule messages for future processing
-- **TTL** — auto-expire messages that are not consumed in time
-- **Dead-letter queue (DLQ)** — failed messages routed to a named DLQ
-- **Subscribe** — register a handler that is called for each incoming message
-- **Durable persistence** — optional RocksDB or Redis backend
+- **Standalone server** (`Kislay\Queue\Server`) — owns queue state, leases jobs, handles retries/DLQ
+- **Producer client** (`Kislay\Queue\Client`) — `push()`/`pushBatch()`, `stats()`, `purge()`
+- **Worker client** (`Kislay\Queue\Worker`) — `consume()` with a handler callback
+- **Job control** (`Kislay\Queue\Job`) — `ack()`/`nack()`/`release()`, attempt tracking
+- **Delayed delivery, TTL, priority via `declare()`/`push()` options**
+- **Dead-letter queue** — configured per-queue via `declare()`
 
 ---
 
 ## Quick Example
 
+Start the queue server (its own process):
+
 ```php
 <?php
-$queue = new Kislay\Queue\Queue();
-
-$queue->connect(['backend' => 'rocksdb', 'path' => '/var/data/queue']);
-
-// Enqueue a standard message
-$queue->enqueue('emails', [
-    'to'      => 'user@example.com',
-    'subject' => 'Welcome!',
+$server = new Kislay\Queue\Server();
+$server->declare('emails', [
+    'visibility_timeout_ms' => 30000,
+    'max_attempts' => 5,
+    'retry_backoff_ms' => 1000,
+    'dead_letter_queue' => 'emails.dlq',
 ]);
+$server->listen('0.0.0.0', 9020);
+$server->run();
+```
 
-// Enqueue with TTL and priority
-$queue->enqueue('notifications', ['type' => 'sms', 'body' => 'Code: 1234'], [
-    'ttl'      => 60,    // expire in 60 seconds
-    'priority' => 10,   // processed before priority < 10
+Push a job (producer):
+
+```php
+<?php
+$client = new Kislay\Queue\Client('http://127.0.0.1:9020');
+
+$jobId = $client->push('emails', [
+    'to' => 'user@example.com',
+    'subject' => 'Welcome',
+], [
+    'headers' => ['trace_id' => 'trace-1'],
+    'max_attempts' => 5,
 ]);
+```
 
-// Delayed message — deliver after 5 minutes
-$queue->enqueue('reports', ['report_id' => 42], ['delay' => 300]);
+Run a worker:
 
-// Subscribe — blocking worker loop
-$queue->subscribe('emails', function ($message, $ack) {
-    sendEmail($message['to'], $message['subject']);
-    $ack(); // acknowledge; remove from queue
-});
+```php
+<?php
+$worker = new Kislay\Queue\Worker('http://127.0.0.1:9020');
 
-// Manual dequeue
-$msg = $queue->dequeue('notifications');
-if ($msg) {
-    processNotification($msg);
-    $queue->ack($msg['id']);
-}
+$worker->consume('emails', function (Kislay\Queue\Job $job) {
+    $payload = $job->payload();
+    sendEmail($payload['to'], $payload['subject']);
+    return true; // truthy ack; return false or throw to nack
+}, [
+    'worker_id' => 'emails-worker-1',
+    'lease_ms' => 30000,
+]);
 ```
 
 ---
 
-## Configuration
+## Public API
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `backend` | string | `memory` | `memory`, `rocksdb`, or `redis` |
-| `path` | string | `/tmp/kislay-queue` | Data directory (RocksDB) |
-| `redis_url` | string | — | Redis connection URL |
-| `default_ttl` | int | `0` (no expiry) | Default message TTL (s) |
-| `dlq_suffix` | string | `:dlq` | Dead-letter queue name suffix |
-| `max_retries` | int | `3` | Retries before DLQ routing |
-| `workers` | int | `2` | Subscriber thread count |
+```php
+namespace Kislay\Queue;
+
+class Server {
+    public function __construct(array $options = []);
+    public function listen(string $host, int $port): bool;
+    public function run(): void;
+    public function stop(): bool;
+    public function declare(string $queue, ?array $options = null): bool;
+    public function stats(?string $queue = null): array;
+}
+
+class Client {
+    public function __construct(string $baseUrl, array $options = []);
+    public function push(string $queue, mixed $payload, ?array $options = null): string;
+    public function pushBatch(string $queue, array $jobs): array;
+    public function stats(string $queue): array;
+    public function purge(string $queue): int;
+}
+
+class Worker {
+    public function __construct(string $baseUrl, array $options = []);
+    public function consume(string $queue, callable $handler, ?array $options = null): bool;
+    public function stop(): bool;
+}
+
+class Job {
+    public function id(): string;
+    public function queue(): string;
+    public function payload(): mixed;
+    public function headers(): array;
+    public function attempts(): int;
+    public function maxAttempts(): int;
+    public function ack(): bool;
+    public function nack(?bool $requeue = true, ?int $delayMs = null): bool;
+    public function release(?int $delayMs = null): bool;
+}
+```
+
+See the [module README](https://github.com/KislayPHP/queue) for the full architecture diagram and the legacy in-process `Queue` class API.
