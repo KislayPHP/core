@@ -1,6 +1,6 @@
 # JWT Security
 
-KislayPHP Core includes built-in JWT validation backed by a C++ HS256/RS256 verifier. When enabled, every request must carry a valid Bearer token; the decoded payload is attached to `$req->user()`.
+KislayPHP Core includes built-in JWT validation backed by a C++ HS256 verifier (RS256 is not currently implemented). When enabled, every request must carry a valid Bearer token; the decoded payload is attached to `$req->user()`.
 
 ---
 
@@ -8,7 +8,7 @@ KislayPHP Core includes built-in JWT validation backed by a C++ HS256/RS256 veri
 
 ```php
 <?php
-$app = new Kislay\App();
+$app = new Kislay\Core\App();
 
 // HS256 shared secret
 $app->setOption('jwt_secret',   getenv('JWT_SECRET'));
@@ -17,7 +17,7 @@ $app->setOption('jwt_required', true);
 // Optional: exclude certain paths from JWT enforcement
 $app->setOption('jwt_exclude', ['/health', '/actuator', '/public']);
 
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```
 
 ---
@@ -49,23 +49,20 @@ $app->get('/admin', function ($req, $res) {
 
 ---
 
-## RS256 (Public Key)
-
-```php
-$app->setOption('jwt_algorithm', 'RS256');
-$app->setOption('jwt_public_key', file_get_contents('/etc/keys/public.pem'));
-```
-
----
-
 ## Options Reference
+
+Only three JWT-related `setOption()` keys actually exist in the current
+source (verified against every `key == "..."` branch in
+`App::setOption()`):
 
 | Option | Type | Description |
 |---|---|---|
 | `jwt_secret` | string | HS256 shared secret |
 | `jwt_required` | bool | Enforce JWT on all routes |
 | `jwt_exclude` | array | Path prefixes exempt from JWT |
-| `jwt_algorithm` | string | `HS256` (default) or `RS256` |
-| `jwt_public_key` | string | PEM public key for RS256 |
-| `jwt_issuer` | string | Validate `iss` claim if set |
-| `jwt_audience` | string | Validate `aud` claim if set |
+
+There is currently **no RS256/public-key support and no `iss`/`aud`
+claim validation** — `jwt_algorithm`, `jwt_public_key`, `jwt_issuer`, and
+`jwt_audience` are not implemented; calling `setOption()` with any of
+them emits `E_WARNING: Unsupported option` and does nothing. Only HS256
+via `jwt_secret` works today.

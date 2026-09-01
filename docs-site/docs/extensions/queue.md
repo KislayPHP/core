@@ -30,7 +30,7 @@ GitHub: <https://github.com/KislayPHP/php-kislay-queue>
 
 ```php
 <?php
-$queue = new Kislay\Queue();
+$queue = new Kislay\Queue\Queue();
 
 $queue->connect(['backend' => 'rocksdb', 'path' => '/var/data/queue']);
 

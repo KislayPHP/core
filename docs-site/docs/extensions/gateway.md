@@ -6,23 +6,19 @@
 
 ## Installation
 
-```bash
-composer require kislayphp/gateway
-```
+There are no pre-built binaries yet — this compiles from source via [PIE](https://github.com/php/pie) or a manual `phpize` build, the same as core. See [Installation](../getting-started/installation.md).
 
-GitHub: <https://github.com/KislayPHP/php-kislay-gateway>
+GitHub: <https://github.com/KislayPHP/gateway>
 
 ---
 
 ## Key Features
 
-- **Reverse proxy** — forward requests to any HTTP upstream by URL pattern
-- **Load balancing** — round-robin and weighted round-robin across multiple upstreams
-- **Circuit breaker** — open after N consecutive failures; auto-closes after reset window
-- **`requireAuth`** — attach JWT validation to any proxied route
-- **Header manipulation** — add, remove, or rewrite request/response headers before forwarding
-- **Retry logic** — configurable retry count and backoff on 5xx upstream errors
-- **Timeout per route** — override the global request timeout for slow upstreams
+- **Reverse proxy** — forward requests to any HTTP upstream, route by exact method+path
+- **Load balancing** — round-robin across multiple targets via `registerService()`
+- **Circuit breaker** — open after N consecutive failures per upstream host; process-wide, configured via env vars, not per-route
+- **`requireAuth`** — JWT validation, enabled gateway-wide (not per individual route)
+- **Standalone process** — `Gateway` does not wrap a Core `App`; it never runs your application code, only proxies to it (see [Architecture](../getting-started/architecture.md))
 
 ---
 
@@ -30,45 +26,47 @@ GitHub: <https://github.com/KislayPHP/php-kislay-gateway>
 
 ```php
 <?php
-$app     = new Kislay\App();
-$gateway = new Kislay\Gateway($app);
+$gateway = new Kislay\Gateway\Gateway();
 
-// Simple proxy — all /api/users/* → user-service
-$gateway->addRoute('/api/users', 'http://user-service:3000', [
-    'strip_prefix' => true,
-]);
+// Simple proxy — GET /api/users → user-service (method, path, target: all required strings)
+$gateway->addRoute('GET', '/api/users', 'http://user-service:3000');
 
-// Load-balanced route with circuit breaker
-$gateway->addRoute('/api/orders', [
+// Load-balanced pool — round-robins across all targets
+$gateway->registerService('order-service', [
     'http://order-service-1:3001',
     'http://order-service-2:3001',
-], [
-    'lb_strategy'  => 'round_robin',
-    'cb_threshold' => 5,    // open after 5 consecutive failures
-    'cb_timeout'   => 30,   // seconds before half-open retry
-    'retries'      => 2,
 ]);
+$gateway->addServiceRoute('GET', '/api/orders', 'order-service');
 
-// Authenticated route
-$gateway->addRoute('/api/admin', 'http://admin-service:4000', [
-    'requireAuth' => true,
-    'timeout'     => 10,
-]);
+// JWT auth, gateway-wide — exclude specific paths from enforcement
+$gateway->requireAuth(getenv('JWT_SECRET'));
+$gateway->setAuthExclude(['/health', '/api/users']);
 
-$app->listen();
+$gateway->listen('0.0.0.0', 8080);
 ```
 
 ---
 
 ## Configuration
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `strip_prefix` | bool | `false` | Remove matched prefix before forwarding |
-| `lb_strategy` | string | `round_robin` | `round_robin` or `weighted` |
-| `cb_threshold` | int | `0` (disabled) | Failures before circuit opens |
-| `cb_timeout` | int | `60` | Seconds in open state before retry |
-| `retries` | int | `0` | Retry count on 5xx |
-| `timeout` | int | `30` | Per-route upstream timeout (s) |
-| `requireAuth` | bool | `false` | Enforce JWT on this route |
-| `add_headers` | array | `[]` | Headers to inject into upstream request |
+Verified route/service methods (all on the `Gateway` object):
+
+| Method | Signature | Description |
+|---|---|---|
+| `addRoute` | `(string $method, string $path, string $target)` | One static upstream per route |
+| `registerService` | `(string $name, string[] $targets)` | Named round-robin pool |
+| `addServiceRoute` | `(string $method, string $path, string $service)` | Route to a registered pool |
+| `requireAuth` | `(string $secret, ?array $options = null)` | Enable JWT validation gateway-wide |
+| `setAuthExclude` | `(string[] $paths)` | Paths exempt from JWT |
+| `setThreads` | `(int $count)` | Worker thread count, before `listen()` |
+| `setFallbackTarget` / `setFallbackService` | `(string $target)` / `(string $service)` | Catch-all for unmatched routes |
+| `listen` | `(string $host, int $port)` | Start serving — no TLS 3rd argument here (unlike Core's `App::listen()`) |
+
+Circuit breaker and rate limiting are process-wide, not per-route, and configured via environment variables (not `setOption`/method calls):
+
+| Env Var | Default | Description |
+|---|---|---|
+| `KISLAY_GATEWAY_CIRCUIT_BREAKER_ENABLED` | `false` | Enable the circuit breaker |
+| `KISLAY_GATEWAY_CB_FAILURE_THRESHOLD` | `5` | Consecutive failures before a host's circuit opens |
+| `KISLAY_GATEWAY_CB_OPEN_SECONDS` | `30` | Seconds a circuit stays open before a retry |
+| `KISLAY_GATEWAY_THREADS` | `1` | CivetWeb worker threads (see `setThreads()` above for the per-instance equivalent) |

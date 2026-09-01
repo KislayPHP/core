@@ -13,8 +13,8 @@ $app->every(5000, function () {
 });
 
 // Run every minute with a label (for logging)
-$app->every(60_000, function () use ($metrics) {
-    $metrics->gauge('queue_depth')->set(Queue::depth('emails'));
+$app->every(60_000, function () use ($metrics, $queue) {
+    $metrics->inc('queue_depth_probe_total');
 }, 'queue-depth-probe');
 ```
 
@@ -67,12 +67,12 @@ Special: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`.
 
 ```php
 <?php
-$app     = new Kislay\App();
-$metrics = new Kislay\Metrics($app);
-$queue   = new Kislay\Queue();
+$app     = new Kislay\Core\App();
+$metrics = new Kislay\Metrics\Metrics();
+$queue   = new Kislay\Queue\Queue();
 
 // Heartbeat every 30 s
-$app->every(30_000, fn () => $metrics->counter('heartbeat_total')->inc());
+$app->every(30_000, fn () => $metrics->inc('heartbeat_total'));
 
 // Process scheduled reports daily at midnight
 $app->schedule('0 0 * * *', function () use ($queue) {
@@ -82,5 +82,5 @@ $app->schedule('0 0 * * *', function () use ($queue) {
 // Warm cache 2 s after startup
 $app->once(2_000, fn () => warmCache());
 
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```

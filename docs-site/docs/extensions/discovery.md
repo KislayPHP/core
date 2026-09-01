@@ -30,7 +30,7 @@ GitHub: <https://github.com/KislayPHP/php-kislay-discovery>
 
 ```php
 <?php
-$discovery = new Kislay\Discovery();
+$discovery = new Kislay\Discovery\ServiceRegistry();
 
 // Connect to the discovery backend (built-in or external)
 $discovery->connect([

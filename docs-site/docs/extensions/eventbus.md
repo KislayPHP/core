@@ -6,11 +6,9 @@
 
 ## Installation
 
-```bash
-composer require kislayphp/eventbus
-```
+There are no pre-built binaries yet — this compiles from source via [PIE](https://github.com/php/pie) or a manual `phpize` build, the same as core. See [Installation](../getting-started/installation.md). Note: `eventbus` is a compatibility package for the older transport name — new work should generally use `kislayphp/socket` instead (see its own docs); both share the same `Kislay\EventBus\*` / civetweb constraints described here.
 
-GitHub: <https://github.com/KislayPHP/php-kislay-eventbus>
+GitHub: <https://github.com/KislayPHP/eventbus>
 
 ---
 
@@ -28,50 +26,47 @@ GitHub: <https://github.com/KislayPHP/php-kislay-eventbus>
 
 ## Quick Example
 
+Event handlers are registered once at the server (or namespace) level with
+`on()`/`onWithAck()` — they fire for *any* client that emits that event,
+they are not registered per-connected-socket:
+
 ```php
 <?php
-$app      = new Kislay\App();
-$eventbus = new Kislay\EventBus($app);
+$server = new Kislay\EventBus\Server();
 
-// Require JWT on the /secure namespace
-$eventbus->namespace('/secure', ['requireAuth' => true]);
-
-// Listen for events on the default namespace
-$eventbus->on('connection', function ($socket) use ($eventbus) {
-    echo "Client connected: {$socket->id}\n";
-
-    $socket->on('chat:message', function ($data, $ack) use ($socket, $eventbus) {
-        // Broadcast to everyone in room
-        $eventbus->to($data['room'])->emit('chat:message', [
-            'from'    => $socket->id,
-            'message' => $data['text'],
-        ]);
-        // Acknowledge sender
-        $ack(['delivered' => true]);
-    });
-
-    $socket->on('join', function ($room) use ($socket) {
-        $socket->join($room);
-        $socket->emit('joined', ['room' => $room]);
-    });
-
-    $socket->on('disconnect', function () use ($socket) {
-        echo "Client disconnected: {$socket->id}\n";
-    });
+$server->on('connection', function (Kislay\EventBus\Socket $socket) {
+    $socket->join('general');
 });
 
-$app->listen();
+$server->on('chat', function (Kislay\EventBus\Socket $socket, array $payload) {
+    $socket->emitTo('general', 'chat', [
+        'from'    => $socket->id(),
+        'message' => $payload['text'] ?? '',
+    ]);
+});
+
+$server->setThreads(4);
+$server->listen('0.0.0.0', 8081);
 ```
+
+`onWithAck()` works like `on()`, but the handler's return value is sent
+back to the caller as the acknowledgement. `namespace(string $name)`
+returns a `Kislay\EventBus\EventNamespace` exposing its own scoped `on()`/
+`emit()`/`emitTo()` — it does not take a second options argument; there is
+no built-in per-namespace `requireAuth` option.
 
 ---
 
 ## Configuration
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `path` | string | `/socket.io` | Socket.IO handshake path |
-| `requireAuth` | bool | `false` | Validate JWT on connection |
-| `ping_interval` | int | `25` | Heartbeat interval (s) |
-| `ping_timeout` | int | `20` | Client timeout (s) |
-| `max_payload` | int | `1048576` | Max WS frame bytes (1 MB) |
-| `redis_adapter` | string | — | Redis URL for multi-node pub/sub |
+| Method | Signature | Description |
+|---|---|---|
+| `on` / `onWithAck` | `(string $event, callable $handler): bool` | Register a global event handler |
+| `emit` / `publish` / `send` | `(string $event, mixed $data): bool` | Broadcast to all connected clients |
+| `emitTo` | `(string $room, string $event, mixed $data): bool` | Broadcast to one room |
+| `namespace` | `(string $name): EventNamespace` | Scoped handler/emit subset |
+| `setThreads` | `(int $count)` | CivetWeb worker thread count, before `listen()` |
+| `setMaxPayload` | `(int $bytes)` | Max WS frame size |
+| `onAuth` | `(callable $handler)` | Hook to validate the handshake before accepting a connection |
+
+See [eventbus's own README](https://github.com/KislayPHP/eventbus) for the full, verified API reference — it's kept in sync with the source more closely than this page.

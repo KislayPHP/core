@@ -31,7 +31,7 @@ class UserController
 $ctrl = new UserController();
 
 $app->get('/users',      [$ctrl, 'index']);
-$app->get('/users/{id}', [$ctrl, 'show']);
+$app->get('/users/:id', [$ctrl, 'show']);
 $app->post('/users',     [$ctrl, 'store']);
 ```
 
@@ -43,7 +43,7 @@ Pass a `"ClassName@method"` string; KislayPHP instantiates the class with `new C
 
 ```php
 $app->get('/users',      'UserController@index');
-$app->get('/users/{id}', 'UserController@show');
+$app->get('/users/:id', 'UserController@show');
 $app->post('/users',     'UserController@store');
 ```
 
@@ -74,14 +74,14 @@ class OrderController
 {
     public function __construct(
         private readonly OrderRepository $repo,
-        private readonly Kislay\Metrics  $metrics,
+        private readonly Kislay\Metrics\Metrics $metrics,
     ) {}
 
     public function index($req, $res): void
     {
         $page   = (int)($req->query['page'] ?? 1);
         $orders = $this->repo->paginate($page);
-        $this->metrics->counter('orders_listed_total')->inc();
+        $this->metrics->inc('orders_listed_total');
         $res->json($orders);
     }
 }

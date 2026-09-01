@@ -8,10 +8,9 @@ When `actuator` is enabled, KislayPHP automatically registers a set of managemen
 
 ```php
 <?php
-$app = new Kislay\App();
+$app = new Kislay\Core\App();
 $app->setOption('actuator', true);
-$app->setOption('port', 8080);
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```
 
 ---
@@ -63,7 +62,7 @@ $app->listen();
 [
   { "method": "GET",  "path": "/orders",      "handler": "OrderController@index" },
   { "method": "POST", "path": "/orders",      "handler": "OrderController@store" },
-  { "method": "GET",  "path": "/orders/{id}", "handler": "Closure" }
+  { "method": "GET",  "path": "/orders/:id", "handler": "Closure" }
 ]
 ```
 

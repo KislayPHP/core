@@ -1,6 +1,6 @@
 # Sub-app Mounting
 
-`$app->mount()` lets you attach a child `Kislay\App` instance at a URI prefix. The mounted sub-app inherits the parent's middleware pipeline but registers its own routes independently.
+`$app->mount()` lets you attach a child `Kislay\Core\App` instance at a URI prefix. The mounted sub-app inherits the parent's middleware pipeline but registers its own routes independently.
 
 ---
 
@@ -15,22 +15,21 @@ When a request matches the mount prefix, the core strips the prefix and dispatch
 ```php
 <?php
 // --- Sub-app: API v1 ---
-$apiV1 = new Kislay\App();
+$apiV1 = new Kislay\Core\App();
 
 $apiV1->get('/users',      fn ($req, $res) => $res->json(['v' => 1, 'resource' => 'users']));
 $apiV1->get('/orders',     fn ($req, $res) => $res->json(['v' => 1, 'resource' => 'orders']));
 
 
 // --- Sub-app: API v2 ---
-$apiV2 = new Kislay\App();
+$apiV2 = new Kislay\Core\App();
 
 $apiV2->get('/users',      fn ($req, $res) => $res->json(['v' => 2, 'resource' => 'users']));
 $apiV2->get('/orders',     fn ($req, $res) => $res->json(['v' => 2, 'resource' => 'orders']));
 
 
 // --- Root app ---
-$app = new Kislay\App();
-$app->setOption('port', 8080);
+$app = new Kislay\Core\App();
 
 // Global middleware applied to all sub-apps
 $app->use(function ($req, $res, $next) {
@@ -45,7 +44,7 @@ $app->mount('/api/v2', $apiV2);   // /api/v2/users, /api/v2/orders
 // Root route still works
 $app->get('/health', fn ($req, $res) => $res->json(['ok' => true]));
 
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```
 
 ---
