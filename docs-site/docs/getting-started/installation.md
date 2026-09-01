@@ -79,10 +79,24 @@ Repeat for each extension repository (`gateway`, `socket`, `discovery`,
 
 ## Docker
 
-There is no published production Docker image yet. `Dockerfile.zts-sigbus`
-in the top-level workspace is a debugging/dev environment (Linux/ZTS
-build for chasing a specific platform-only bug), not something intended
-for running a real app — don't use it as a production base image.
+There is no published production image yet, but the `quickstart/`
+directory in the workspace root has a verified, working
+`docker-compose.yml` + `Dockerfile` that builds Core from source inside
+the container and runs a real Hello World server — no PHP or C++
+toolchain needed on your host:
+
+```bash
+cd quickstart
+docker compose up --build
+curl http://localhost:8080/
+```
+
+This is a **quickstart/dev example, not a production-hardened image**
+(no image-size optimization, no non-root user, no TLS) — see its own
+README for details and caveats. `Dockerfile.zts-sigbus` in the workspace
+root is unrelated: a debugging/dev environment (Linux/ZTS build for
+chasing a specific platform-only bug), not something to run a real app
+from.
 
 ---
 
