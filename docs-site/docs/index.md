@@ -42,14 +42,13 @@ See [Installation](getting-started/installation.md) — there are no pre-built b
 
 ```php
 <?php
-$app = new Kislay\App();
-$app->setOption('port', 8080);
+$app = new Kislay\Core\App();
 
-$app->get('/hello/{name}', function ($req, $res) {
+$app->get('/hello/:name', function ($req, $res) {
     $res->json(['message' => 'Hello, ' . $req->params['name']]);
 });
 
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```
 
 Run it:

@@ -8,14 +8,13 @@ This guide walks you through the most common patterns you will use daily with Ki
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-$app = new Kislay\App();
-$app->setOption('port', 8080);
+$app = new Kislay\Core\App();
 
 $app->get('/', function ($req, $res) {
     $res->json(['message' => 'Hello, World!']);
 });
 
-$app->listen();
+$app->listen('0.0.0.0', 8080);
 ```
 
 ```bash
@@ -30,21 +29,23 @@ php server.php
 KislayPHP supports all standard HTTP verbs:
 
 ```php
-$app->get('/users',         [$ctrl, 'index']);
-$app->post('/users',        [$ctrl, 'store']);
-$app->put('/users/{id}',    [$ctrl, 'update']);
-$app->delete('/users/{id}', [$ctrl, 'destroy']);
-$app->patch('/users/{id}',  [$ctrl, 'patch']);
+$app->get('/users',        [$ctrl, 'index']);
+$app->post('/users',       [$ctrl, 'store']);
+$app->put('/users/:id',    [$ctrl, 'update']);
+$app->delete('/users/:id', [$ctrl, 'destroy']);
+$app->patch('/users/:id',  [$ctrl, 'patch']);
 ```
 
 ---
 
 ## Route Parameters
 
-Named segments prefixed with `{` and `}` are captured into `$req->params`:
+Named segments prefixed with `:` are captured into `$req->params`. Only
+static segments and `:param` segments are supported — regex-style routes
+and wildcard fragments are rejected at registration time:
 
 ```php
-$app->get('/orders/{orderId}/items/{itemId}', function ($req, $res) {
+$app->get('/orders/:orderId/items/:itemId', function ($req, $res) {
     $orderId = $req->params['orderId'];
     $itemId  = $req->params['itemId'];
     $res->json(['order' => $orderId, 'item' => $itemId]);
