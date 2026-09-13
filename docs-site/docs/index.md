@@ -17,7 +17,7 @@ KislayPHP brings Spring Boot-inspired architecture to PHP — a suite of nine C+
 | Metrics | External APM | Prometheus-compatible Metrics ext |
 | Database | PDO / ORM | Persistence extension |
 | Scheduler | Cron + shell | $app->schedule() / every() |
-| Configuration | .env only | Config ext (env / consul / etcd) |
+| Configuration | .env only | Config ext (layered global/env/project/service/node) |
 
 ---
 
@@ -31,8 +31,8 @@ KislayPHP brings Spring Boot-inspired architecture to PHP — a suite of nine C+
 | EventBus | `pie install kislayphp/eventbus` | WebSocket / Socket.IO, namespaces, auth |
 | Queue | `pie install kislayphp/queue` | Enqueue, TTL, DLQ, priority, delayed |
 | Metrics | `pie install kislayphp/metrics` | Counter / gauge / histogram, Prometheus export |
-| Persistence | `pie install kislayphp/persistence` | DB connect, CRUD, migrations |
-| Config | `pie install kislayphp/config` | Typed getters, live refresh, consul/etcd |
+| Persistence | `pie install kislayphp/persistence` | DB connect, raw SQL + bindings, migrations |
+| Config | `pie install kislayphp/config` | Typed getters, layered scopes, standalone config server |
 
 See [Installation](getting-started/installation.md) — there are no pre-built binaries yet, so this compiles the extension on your machine (C++ compiler + headers required).
 
