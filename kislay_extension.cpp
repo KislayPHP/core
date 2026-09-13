@@ -556,18 +556,51 @@ kislay::KislayPHPSession::KislayPHPSession(php_kislay_app_t *app)
     }
 }
 
+static void kislay_promise_reject(php_kislay_promise_t *promise, zval *reason);
+static void kislay_promise_dispatch(php_kislay_promise_t *promise);
+
+// Rejects and dispatches the promise (if any) registered for task_id before
+// its backing pending-task entry is torn down, so a then()/catch()/finally()
+// handler a caller already registered actually fires (with a clear "app
+// stopped" reason) instead of being silently dropped by promise_registry's
+// own clear() below, which only releases refs without ever calling back into
+// PHP. Safe to call unconditionally - kislay_promise_reject() is a no-op for
+// a promise that isn't Pending, and kislay_promise_dispatch() is a no-op for
+// a null promise.
+static void kislay_async_reject_pending_promise(KislayAsyncLaneState &lane,
+                                                kislay::runtime::TaskId task_id,
+                                                zval *reason) {
+    php_kislay_promise_t *promise = lane.promise_registry ? lane.promise_registry->get_promise(task_id) : nullptr;
+    if (promise == nullptr) {
+        return;
+    }
+    kislay_promise_reject(promise, reason);
+    kislay_promise_dispatch(promise);
+    lane.promise_registry->unregister_promise(task_id);
+}
+
 static void kislay_async_lane_clear(KislayAsyncLaneState &lane) {
+    zval shutdown_reason;
+    ZVAL_STRING(&shutdown_reason, "Kislay\\Core\\App stopped before this task completed");
+
     for (auto &entry : lane.pending_php_tasks) {
+        kislay_async_reject_pending_promise(lane, entry.first, &shutdown_reason);
         zval_ptr_dtor(&entry.second.callable);
     }
     lane.pending_php_tasks.clear();
 
     for (auto &entry : lane.pending_http_tasks) {
+        kislay_async_reject_pending_promise(lane, entry.first, &shutdown_reason);
         kislay_release_async_http(entry.second.async_http);
     }
     lane.pending_http_tasks.clear();
     lane.pending_request_counts.clear();
 
+    zval_ptr_dtor(&shutdown_reason);
+
+    // Defensive fallback only - every promise registered via register_promise()
+    // has a matching entry in one of the two maps above (see the two call
+    // sites), so this should find nothing left to release by this point.
     if (lane.promise_registry) {
         lane.promise_registry->clear();
     }

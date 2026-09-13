@@ -165,23 +165,65 @@ just single-request phpt cases) added specifically because
 single-request tests kept missing bugs that only manifest under
 concurrent resets/connection churn.
 
-## Known, deliberately-not-fixed limitation
+## Dropped-promise-on-shutdown fix (2026-09-13)
 
-`WorkerPool::stop()`/`PhpRuntimePool::stop()` silently drop thread-local
-pending retries/queued requests on shutdown (audited 2026-08-30). Not a
-crash and not an unbounded leak (bounded to one App's lifetime, no Zend
-refs involved — `HttpRequestTask`/`RuntimeRequestMessage` hold no zvals) —
-but a `Promise` registered for a dropped retry never resolves/rejects, and
-a caller in `RequestCompletion::wait_for()` times out instead of getting
-an immediate response. Left unfixed deliberately: a proper fix means
-touching `PromiseRegistry` semantics, judged too large a change to make
-confidently without a clearer reachable-impact case. Worth a dedicated
-session if this needs closing.
+**FIXED:** a `Promise` for a still-pending `async()` PHP task or
+`AsyncHttp`/retry HTTP task used to never resolve/reject if the `App` was
+destroyed before the task was drained — `PromiseRegistry::clear()` (called
+from `kislay_async_lane_clear()`, itself called from `kislay_app_free_obj()`
+on shutdown) just released every remaining promise's refcount without ever
+invoking its `then()`/`catch()`/`finally()` callbacks. A registered
+`catch()` handler would simply never fire, silently, no warning. Root
+cause was narrower than it first looked (previously described as "needs
+touching PromiseRegistry semantics, too large to fix confidently") — the
+actual fix only needed `kislay_async_lane_clear()` to reject+dispatch each
+lane's still-pending promise (via the same `kislay_promise_reject()` /
+`kislay_promise_dispatch()` / `unregister_promise()` sequence every normal
+resolution path already uses) *before* handing off to `promise_registry->
+clear()`'s defensive fallback release. New helper:
+`kislay_async_reject_pending_promise()`, applied to both
+`lane.pending_php_tasks` and `lane.pending_http_tasks`. The rejection
+reason is the string `"Kislay\Core\App stopped before this task
+completed"`.
+
+Verified empirically, not just by code reading — `tests/async_promise_shutdown_rejection_test.phpt`
+(ZTS-only: needs `listenAsync()`'s non-blocking return to leave a task
+genuinely undrained) queues 100 decoy `async()` tasks ahead of a target one
+so that `then()`/`catch()`/`finally()`'s own "opportunistic drain" (budget
+64 per call — a real gotcha, see below) can't reach the target task before
+`unset($app)` destroys the App. Confirmed both directions: fails (callback
+silently never fires) against the pre-fix code, passes against the fix.
+Full 23/23 ZTS suite green (built via `build_zts_php.sh` +
+`third_party`/rsync-scratch pattern — **do not blanket-exclude `config.*`
+in that rsync**, it deletes the load-bearing `config.m4` phpize needs,
+not just generated build artifacts; exclude `config.h`/`config.status`/
+`config.log` by name instead), 20/20 NTS suite green.
+
+**Gotcha for future async/Promise work:** `then()`/`catch()`/`finally()`
+each call `kislay_async_drain_lane(app, lane, 64)` once, synchronously,
+before checking the promise's own state — an "opportunistic drain" that
+processes up to 64 pending tasks for the *entire lane*, not just the
+promise being called on. Registering a callback on a promise can resolve
+a *different* promise's task as a side effect, and — as this session found
+the hard way while writing a test — can resolve the very promise you're
+registering the callback on if it's not yet been dispatched.
+
+**Still open, narrower than before:** `PhpRuntimePool::stop()` still
+silently drops any `RuntimeRequestMessage` left in `request_queue_`
+without calling its `completion->complete(...)` — unrelated to
+`PromiseRegistry` entirely (this is the plain-condvar `RequestCompletion`
+used for cross-thread request dispatch, not the `Promise` class). Not a
+crash, not a leak (bounded, no zvals in `RuntimeRequestMessage`) — a
+caller blocked in `RequestCompletion::wait_for(timeout)` just times out at
+its own timeout instead of getting an immediate response. Worth a small,
+separate, self-contained fix (drain `request_queue_` in `stop()` and
+`complete()` each leftover request with a "shutting down" error response)
+if this needs closing — doesn't touch `PromiseRegistry` at all.
 
 ## Testing
 
-Standard phpt, `make test`. 20/22 (2 ZTS-only tests correctly skipped on
-an NTS build; 0 failures) as of 2026-08-30. For libuv-specific work, also
+Standard phpt, `make test`. 20/23 (3 ZTS-only tests correctly skipped on
+an NTS build; 0 failures) as of 2026-09-13. For libuv-specific work, also
 build/test against real ZTS (`./build_zts_php.sh`) — several bugs here
 only manifest under ZTS or under Linux, not this machine's default NTS
 macOS build; see `Dockerfile.zts-sigbus` for a reusable Linux/arm64 debug
@@ -192,5 +234,7 @@ emulation — a genuinely useful "same CPU, different OS" comparison point).
 
 1. `listenAsync()` + `AsyncHttp`/`Promise` SIGBUS — see above, the
    headline open issue in this entire ecosystem as of 2026-08-30.
-2. `WorkerPool`/`PhpRuntimePool` shutdown silently drops pending
-   work/retries — see above, deliberately deferred, not urgent.
+2. `PhpRuntimePool::stop()` silently drops queued `RuntimeRequestMessage`s
+   without completing them — see "Dropped-promise-on-shutdown fix" above;
+   narrower and lower-severity than it looked before 2026-09-13 (the
+   `Promise`/`PromiseRegistry` half of that issue is now fixed).
