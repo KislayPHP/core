@@ -98,6 +98,26 @@ void PhpRuntimePool::stop() {
         }
     }
     runtime_threads_storage_.clear();
+
+    // Any RuntimeRequestMessage still sitting in the queue here was never
+    // handed to a worker thread (all of them have already exited above, and
+    // SingleThreadLoop mode has none to begin with) and never will be -
+    // complete it with an explicit "shutting down" response instead of just
+    // dropping it, so a caller blocked in RequestCompletion::wait_for()
+    // gets an immediate answer rather than timing out. Safe to pop here
+    // unsynchronized with anyone else: every thread that could have popped
+    // from request_queue_ has already been joined above.
+    RuntimeRequestMessage leftover;
+    while (request_queue_.try_pop(leftover)) {
+        if (leftover.completion) {
+            RuntimeResponseMessage response;
+            response.task_id = leftover.task_id;
+            response.status_code = 503;
+            response.body = "Service Unavailable";
+            response.request_error = "PHP runtime pool stopped before this request was processed";
+            leftover.completion->complete(std::move(response));
+        }
+    }
 }
 
 bool PhpRuntimePool::submit(RuntimeRequestMessage request) {

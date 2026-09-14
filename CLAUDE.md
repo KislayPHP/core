@@ -208,17 +208,41 @@ a *different* promise's task as a side effect, and — as this session found
 the hard way while writing a test — can resolve the very promise you're
 registering the callback on if it's not yet been dispatched.
 
-**Still open, narrower than before:** `PhpRuntimePool::stop()` still
-silently drops any `RuntimeRequestMessage` left in `request_queue_`
-without calling its `completion->complete(...)` — unrelated to
-`PromiseRegistry` entirely (this is the plain-condvar `RequestCompletion`
-used for cross-thread request dispatch, not the `Promise` class). Not a
-crash, not a leak (bounded, no zvals in `RuntimeRequestMessage`) — a
-caller blocked in `RequestCompletion::wait_for(timeout)` just times out at
-its own timeout instead of getting an immediate response. Worth a small,
-separate, self-contained fix (drain `request_queue_` in `stop()` and
-`complete()` each leftover request with a "shutting down" error response)
-if this needs closing — doesn't touch `PromiseRegistry` at all.
+## PhpRuntimePool::stop() leftover-request completion fix (2026-09-14)
+
+**FIXED, with an important caveat found empirically:** `PhpRuntimePool::
+stop()` used to silently drop any `RuntimeRequestMessage` left in
+`request_queue_` without ever calling its `completion->complete(...)` —
+unrelated to `PromiseRegistry` entirely (this is the plain-condvar
+`RequestCompletion` used for cross-thread request dispatch, not the
+`Promise` class). Fixed by draining `request_queue_` via `try_pop()` after
+all runtime threads are joined (safe — nothing else can still be popping
+from the queue at that point) and completing each leftover with a 503
+`RuntimeResponseMessage`, mirroring the existing "handler_ not configured"
+error-response pattern a few lines above it in the same function.
+
+**Caveat, discovered via a real end-to-end empirical probe (not just code
+reading) — the fix does NOT change what an HTTP client actually sees.**
+`kislay_app_stop_server()` calls `mg_stop()`/`kislay_app_stop_server_uv()`
+*before* `kislay_app_stop_runtime()` (→ `PhpRuntimePool::stop()`) — so by
+the time this fix's `complete()` call runs, CivetWeb/libuv have already
+torn down the underlying TCP connection. Verified directly: a `/slow`
+handler occupying the pool's one worker thread + a `/fast` request queued
+behind it + SIGTERM mid-flight → the `/fast` socket sees an immediate,
+empty connection close (no HTTP status line at all), regardless of this
+fix. **The real, verified benefit is purely internal:** the
+`RequestCompletion` for the dropped request is no longer silently
+abandoned (dangling, could time out a caller elsewhere in the codebase
+that isn't gated by an already-dead socket) — not a client-visible status
+code change for today's CivetWeb/libuv-served HTTP path. Don't describe
+this fix as "clients now get a clean 503 on shutdown" — they don't; they
+get what they always got (an abrupt reset), just via the transport layer
+tearing down first rather than via this specific code path.
+
+No regression risk: not exercised by any client-visible test (deliberately
+not added — see the caveat above, a real end-to-end test would be
+asserting on `mg_stop()`'s socket-teardown timing, not on this fix), but
+full 23/23 ZTS suite and 20/20 NTS suite stay green after this change.
 
 ## Testing
 
@@ -233,8 +257,12 @@ emulation — a genuinely useful "same CPU, different OS" comparison point).
 ## Known open issues
 
 1. `listenAsync()` + `AsyncHttp`/`Promise` SIGBUS — see above, the
-   headline open issue in this entire ecosystem as of 2026-08-30.
-2. `PhpRuntimePool::stop()` silently drops queued `RuntimeRequestMessage`s
-   without completing them — see "Dropped-promise-on-shutdown fix" above;
-   narrower and lower-severity than it looked before 2026-09-13 (the
-   `Promise`/`PromiseRegistry` half of that issue is now fixed).
+   headline open issue in this entire ecosystem as of 2026-08-30. Blocked
+   on the user running `sudo /usr/sbin/DevToolsSecurity -enable` on the
+   primary dev machine (still not done as of 2026-09-14) before a future
+   pass can do real interactive lldb work.
+
+Both of the module's other previously-documented issues (the dropped-
+promise-on-shutdown gap and the `PhpRuntimePool::stop()` leftover-request
+gap) are now fixed — see the two dated sections above for what each fix
+does and does not change.
